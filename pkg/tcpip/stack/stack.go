@@ -1518,15 +1518,54 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		decision := s.routeSelector(remoteAddr)
 		
 		if decision.LocalDelivery {
-			// TODO: Implement local delivery route creation
-			// For now, fall through to normal routing
-			_ = decision
+			// Local delivery: create route through NIC 1 (TUN) for writeLoop to handle.
+			// writeLoop will detect fakeIP and deliver to Forwarder.
+			if nic, ok := s.nics[1]; ok && nic.Enabled() {
+				if addressEndpoint := s.getAddressEP(nic, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+					return makeRoute(
+						netProto,
+						remoteAddr, /* gateway - send to destination via TUN */
+						localAddr,
+						remoteAddr,
+						nic, /* outgoingNIC - NIC 1 */
+						nic, /* localAddressNIC */
+						addressEndpoint,
+						s.handleLocal,
+						multicastLoop,
+						0, /* mtu */
+					), nil
+				}
+			}
 		}
 		
 		if decision.NeedIPIP {
-			// TODO: Implement IPIP encapsulation route creation
-			// For now, fall through to normal routing
-			_ = decision
+			// IPIP encapsulation: find TunnelNIC for egress VIP.
+			// TunnelNICs have IDs starting at 201.
+			// Find route to egress VIP through a TunnelNIC.
+			egressVIP := decision.EgressVIP
+			if egressVIP != (tcpip.Address{}) {
+				// Look for a TunnelNIC that can reach the egress VIP
+				for _, aNIC := range s.nics {
+					if aNIC.ID() < 201 {
+						continue // Skip non-tunnel NICs
+					}
+					if addressEndpoint := s.getAddressEP(aNIC, localAddr, egressVIP, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+						return makeRoute(
+							netProto,
+							egressVIP, /* gateway - egress VIP */
+							localAddr,
+							remoteAddr, /* original destination (inner packet) */
+							aNIC, /* outgoingNIC - TunnelNIC */
+							aNIC, /* localAddressNIC */
+							addressEndpoint,
+							s.handleLocal,
+							multicastLoop,
+							0, /* mtu */
+						), nil
+					}
+				}
+			}
+			// Fall through to normal routing if no TunnelNIC found
 		}
 	}
 
