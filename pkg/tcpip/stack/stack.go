@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -205,6 +206,18 @@ type Stack struct {
 	// If set, it's called during FindRoute to handle special cases like
 	// fakeIP local delivery, IPIP encapsulation, etc.
 	routeSelector RouteSelector `state:"nosave"`
+
+	// ipipSourceAddress is the source address used for IPIP-encapsulated
+	// (outer) packets built in the forwarding path (Phaethon design §4.2:
+	// outer src = local EIP). Empty falls back to the route's local address.
+	ipipSourceAddress tcpip.Address `state:"nosave"`
+
+	// routeDecisionCache caches RouteSelector decisions per destination
+	// address (Phaethon design §2.5). Only decisions with Cacheable=true
+	// are stored; invalidated via ClearRouteDecisionCache on route/topology
+	// changes. Protected by routeDecisionCacheMu.
+	routeDecisionCache   map[tcpip.Address]RouteDecision `state:"nosave"`
+	routeDecisionCacheMu sync.RWMutex                    `state:"nosave"`
 }
 
 // NetworkProtocolFactory instantiates a network protocol.
@@ -557,6 +570,37 @@ func (s *Stack) SetRouteSelector(rs RouteSelector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.routeSelector = rs
+
+	// A new selector invalidates any previously cached decisions.
+	// Lock order: s.mu -> routeDecisionCacheMu.
+	s.routeDecisionCacheMu.Lock()
+	s.routeDecisionCache = nil
+	s.routeDecisionCacheMu.Unlock()
+}
+
+// ClearRouteDecisionCache invalidates all cached RouteSelector decisions
+// (Phaethon design §2.5). Callers must invoke this when the inputs the
+// selector depends on change (route table, mesh topology, fakeIP pool reset).
+func (s *Stack) ClearRouteDecisionCache() {
+	s.routeDecisionCacheMu.Lock()
+	defer s.routeDecisionCacheMu.Unlock()
+	s.routeDecisionCache = nil
+}
+
+// SetIPIPSourceAddress sets the source address for IPIP-encapsulated (outer)
+// packets in the forwarding path (Phaethon design §4.2: outer src = local
+// EIP). The EIP is a NAT/tunnel identity only and is not bound to any NIC.
+func (s *Stack) SetIPIPSourceAddress(addr tcpip.Address) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ipipSourceAddress = addr
+}
+
+// IPIPSourceAddress returns the configured IPIP outer source address.
+func (s *Stack) IPIPSourceAddress() tcpip.Address {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ipipSourceAddress
 }
 
 // Clock returns the Stack's clock for retrieving the current time and
@@ -1514,9 +1558,29 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	// Phaethon patch #3: Call RouteSelector if set.
 	// This allows custom routing decisions for special cases like fakeIP
 	// local delivery, IPIP encapsulation, etc.
+	// Phaethon design §2.5: decisions flagged Cacheable are cached per
+	// destination address; ClearRouteDecisionCache invalidates on topology
+	// changes.
 	if s.routeSelector != nil {
-		decision := s.routeSelector(remoteAddr)
-		
+		var decision RouteDecision
+
+		s.routeDecisionCacheMu.RLock()
+		cached, ok := s.routeDecisionCache[remoteAddr]
+		s.routeDecisionCacheMu.RUnlock()
+		if ok {
+			decision = cached
+		} else {
+			decision = s.routeSelector(remoteAddr)
+			if decision.Cacheable {
+				s.routeDecisionCacheMu.Lock()
+				if s.routeDecisionCache == nil {
+					s.routeDecisionCache = make(map[tcpip.Address]RouteDecision)
+				}
+				s.routeDecisionCache[remoteAddr] = decision
+				s.routeDecisionCacheMu.Unlock()
+			}
+		}
+
 		if decision.LocalDelivery {
 			// Local delivery: create route through NIC 1 (TUN) for writeLoop to handle.
 			// writeLoop will detect fakeIP and deliver to Forwarder.
