@@ -63,9 +63,11 @@ type Route struct {
 	// Phaethon: IPIP encapsulation fields for tunnel routing.
 	// NeedIPIP indicates whether packets on this route need IPIP encapsulation.
 	NeedIPIP bool
-	// EgressVIP is the VIP of the egress node for IPIP encapsulation.
+	// EgressEIP is the EIP (tunnel terminator identity) of the egress node
+	// for IPIP encapsulation; the outer header destination. The frame-level
+	// decapsulator matches on outer dst == its local EIP.
 	// Only valid when NeedIPIP is true.
-	EgressVIP tcpip.Address
+	EgressEIP tcpip.Address
 }
 
 // +stateify savable
@@ -179,7 +181,7 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 		multicastLoop,
 		mtu,
 		false, /* needIPIP */
-		tcpip.Address{}, /* egressVIP */
+		tcpip.Address{}, /* egressEIP */
 	)
 
 	return r
@@ -187,7 +189,7 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 
 // makeRoute initializes a new route. It takes ownership of the provided
 // AssignableAddressEndpoint.
-func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, handleLocal, multicastLoop bool, mtu uint32, needIPIP bool, egressVIP tcpip.Address) *Route {
+func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteAddr tcpip.Address, outgoingNIC, localAddressNIC *nic, localAddressEndpoint AssignableAddressEndpoint, handleLocal, multicastLoop bool, mtu uint32, needIPIP bool, egressEIP tcpip.Address) *Route {
 	if localAddressNIC.stack != outgoingNIC.stack {
 		panic(fmt.Sprintf("cannot create a route with NICs from different stacks"))
 	}
@@ -216,7 +218,7 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 	r := makeRouteInner(netProto, localAddr, remoteAddr, outgoingNIC, localAddressNIC, localAddressEndpoint, loop, mtu)
 	// Phaethon: Set IPIP encapsulation fields
 	r.NeedIPIP = needIPIP
-	r.EgressVIP = egressVIP
+	r.EgressEIP = egressEIP
 	
 	if r.Loop()&PacketOut == 0 {
 		// Packet will not leave the stack, no need for a gateway or a remote link

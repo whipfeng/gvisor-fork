@@ -851,9 +851,10 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 
 	// Outer header per design §4.2:
 	//   src  = local EIP (tunnel identity, not bound to any NIC)
-	//   dst  = egress node VIP
+	//   dst  = egress node EIP (tunnel terminator; the peer's frame-level
+	//          decapsulator matches outer dst == its local EIP)
 	//   proto = 4 (IPIP)
-	egressVIP := route.EgressVIP
+	egressEIP := route.EgressEIP
 	localEIP := e.protocol.stack.IPIPSourceAddress()
 	if localEIP.BitLen() == 0 {
 		localEIP = route.LocalAddress()
@@ -872,14 +873,14 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 		TTL:         64,
 		Protocol:    4, // IPIP (IP protocol number 4)
 		SrcAddr:     localEIP,
-		DstAddr:     egressVIP,
+		DstAddr:     egressEIP,
 	})
 	outerH.SetChecksum(^outerH.CalculateChecksum())
 
-	// Route the outer packet to the egress VIP through the normal route
+	// Route the outer packet to the egress EIP through the normal route
 	// table (RouteSelector returns an empty decision for mesh addresses).
 	stk := e.protocol.stack
-	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressVIP, ProtocolNumber, false /* multicastLoop */)
+	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressEIP, ProtocolNumber, false /* multicastLoop */)
 	if err != nil {
 		return &ip.ErrOther{Err: err}
 	}

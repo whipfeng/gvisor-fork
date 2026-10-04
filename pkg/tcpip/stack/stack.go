@@ -73,9 +73,11 @@ type RouteDecision struct {
 	// NeedIPIP indicates whether the packet needs IPIP encapsulation.
 	NeedIPIP bool
 
-	// EgressVIP is the VIP of the egress node for IPIP encapsulation.
+	// EgressEIP is the EIP (tunnel terminator identity) of the egress node
+	// for IPIP encapsulation; the outer header destination. The frame-level
+	// decapsulator matches on outer dst == its local EIP.
 	// Only valid when NeedIPIP is true.
-	EgressVIP tcpip.Address
+	EgressEIP tcpip.Address
 
 	// Cacheable indicates whether this decision can be cached.
 	// Set to false for dynamic routing decisions (e.g., load-based).
@@ -1615,11 +1617,11 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	if s.routeSelector != nil && id == 0 && localAddr == (tcpip.Address{}) {
 		if decision, ok := s.decisionForSelectorRLocked(remoteAddr); ok && decision.NeedIPIP {
 			// IPIP encapsulation: build a placeholder route carrying
-			// NeedIPIP/EgressVIP. The inner route is never written;
+			// NeedIPIP/EgressEIP. The inner route is never written;
 			// forwardUnicastPacket encapsulates and re-routes the outer
-			// packet to decision.EgressVIP. Prefer NIC 1 (holds bound
+			// packet to decision.EgressEIP. Prefer NIC 1 (holds bound
 			// addresses; Link NICs bind none so getAddressEP fails there).
-			if egressVIP := decision.EgressVIP; egressVIP != (tcpip.Address{}) {
+			if egressEIP := decision.EgressEIP; egressEIP != (tcpip.Address{}) {
 				outgoingNIC, ok := s.nics[1]
 				if !ok || !outgoingNIC.Enabled() {
 					outgoingNIC = nil
@@ -1644,11 +1646,11 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 							multicastLoop,
 							0, /* mtu */
 							true, /* needIPIP */
-							egressVIP,
+							egressEIP,
 						), nil
 					}
 				}
-				// Fall through to normal routing if no route to egress VIP.
+				// Fall through to normal routing if no route to egress EIP.
 			}
 		}
 		// LocalDelivery decisions are resolved by handleValidatedPacket
@@ -1681,7 +1683,7 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 					multicastLoop,
 					0, /* mtu */
 					false, /* needIPIP */
-					tcpip.Address{}, /* egressVIP */
+					tcpip.Address{}, /* egressEIP */
 				), nil
 			}
 		}
@@ -1845,7 +1847,7 @@ func (s *Stack) FindRouteViaNIC(id tcpip.NICID, remoteAddr tcpip.Address, netPro
 			multicastLoop,
 			0, /* mtu */
 			false, /* needIPIP */
-			tcpip.Address{}, /* egressVIP */
+			tcpip.Address{}, /* egressEIP */
 		), nil
 	}
 	return nil, &tcpip.ErrNetworkUnreachable{}
