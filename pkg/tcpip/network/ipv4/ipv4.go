@@ -809,6 +809,12 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	}
 	defer r.Release()
 
+	// Phaethon: IPIP encapsulation for tunnel routing.
+	// If the route requires IPIP encapsulation, wrap the packet and re-route.
+	if r.NeedIPIP {
+		return e.forwardWithIPIPEncapsulation(r, pkt)
+	}
+
 	// TODO(https://gvisor.dev/issue/7472): Unicast IP options should be updated
 	// using the output endpoint (instead of the input endpoint). In particular,
 	// RFC 1812 section 5.2.1 states the following:
@@ -820,6 +826,62 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	//	 unnumbered interface. Thus, processing of these options cannot be
 	//	 completed until after the output interface is chosen.
 	return e.forwardPacketWithRoute(r, pkt, false /* updateOptions */)
+}
+
+// forwardWithIPIPEncapsulation encapsulates the packet with IPIP header and forwards it.
+// This implements the "IPIP in forwarding path" design from gvisor_route_selector_architecture.md.
+func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.PacketBuffer) ip.ForwardingError {
+	// Get the inner packet (original packet)
+	innerPktView := pkt.NetworkHeader().View()
+	defer innerPktView.Release()
+	innerPkt := innerPktView.AsSlice()
+
+	// Create outer IP header
+	// Source: local EIP (from route's NIC)
+	// Destination: egress VIP (from route.EgressVIP)
+	// Protocol: 4 (IPIP)
+	egressVIP := route.EgressVIP
+	
+	// Get local EIP (subnet + 4) from the outgoing NIC
+	// For now, use the route's local address as a placeholder
+	// In production, this should be calculated from the mesh subnet
+	localEIP := route.LocalAddress() // TODO: Calculate EIP properly from mesh subnet
+
+	// Create outer IP header
+	outerHeaderLen := header.IPv4MinimumSize
+	outerPktLen := outerHeaderLen + len(innerPkt)
+	outerPktBuf := make([]byte, outerPktLen)
+	
+	outerH := header.IPv4(outerPktBuf)
+	outerH.Encode(&header.IPv4Fields{
+		TotalLength: uint16(outerPktLen),
+		TTL:         64,
+		Protocol:    4, // IPIP
+		SrcAddr:     localEIP,
+		DstAddr:     egressVIP,
+	})
+	outerH.SetChecksum(0)
+	outerH.SetChecksum(^header.Checksum(outerPktBuf[:outerHeaderLen], 0))
+	
+	// Copy inner packet after outer header
+	copy(outerPktBuf[outerHeaderLen:], innerPkt)
+
+	// Create a new PacketBuffer for the outer packet
+	outerPktBufPtr := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(outerPktBuf),
+	})
+	defer outerPktBufPtr.DecRef()
+
+	// Find route for the outer packet (to egress VIP)
+	stk := e.protocol.stack
+	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressVIP, ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		return &ip.ErrOther{Err: err}
+	}
+	defer outerRoute.Release()
+
+	// Forward the outer packet
+	return e.forwardPacketWithRoute(outerRoute, outerPktBufPtr, false /* updateOptions */)
 }
 
 // HandlePacket is called by the link layer when new ipv4 packets arrive for

@@ -1533,39 +1533,31 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 						s.handleLocal,
 						multicastLoop,
 						0, /* mtu */
+						false, /* needIPIP */
+						tcpip.Address{}, /* egressVIP */
 					), nil
 				}
 			}
 		}
 		
 		if decision.NeedIPIP {
-			// IPIP encapsulation: find TunnelNIC for egress VIP.
-			// TunnelNICs have IDs starting at 201.
-			// Find route to egress VIP through a TunnelNIC.
+			// IPIP encapsulation: find route to egress VIP through Link NIC.
+			// The route will have NeedIPIP=true, and forwardUnicastPacket will
+			// perform the actual IPIP encapsulation.
 			egressVIP := decision.EgressVIP
 			if egressVIP != (tcpip.Address{}) {
-				// Look for a TunnelNIC that can reach the egress VIP
-				for _, aNIC := range s.nics {
-					if aNIC.ID() < 201 {
-						continue // Skip non-tunnel NICs
-					}
-					if addressEndpoint := s.getAddressEP(aNIC, localAddr, egressVIP, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
-						return makeRoute(
-							netProto,
-							egressVIP, /* gateway - egress VIP */
-							localAddr,
-							remoteAddr, /* original destination (inner packet) */
-							aNIC, /* outgoingNIC - TunnelNIC */
-							aNIC, /* localAddressNIC */
-							addressEndpoint,
-							s.handleLocal,
-							multicastLoop,
-							0, /* mtu */
-						), nil
-					}
+				// Find route to egress VIP (will match a Link NIC route)
+				// Use normal route lookup to find the best path to egress VIP
+				if r := s.findRouteRLocked(0, localAddr, egressVIP, netProto, multicastLoop); r != nil {
+					// Mark this route as needing IPIP encapsulation
+					r.NeedIPIP = true
+					r.EgressVIP = egressVIP
+					// The remoteAddr (original destination) is kept in r.routeInfo.RemoteAddress
+					// forwardUnicastPacket will use it as the inner destination
+					return r, nil
 				}
 			}
-			// Fall through to normal routing if no TunnelNIC found
+			// Fall through to normal routing if no route to egress VIP
 		}
 	}
 
@@ -1592,6 +1584,8 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 					s.handleLocal,
 					multicastLoop,
 					0, /* mtu */
+					false, /* needIPIP */
+					tcpip.Address{}, /* egressVIP */
 				), nil
 			}
 		}
