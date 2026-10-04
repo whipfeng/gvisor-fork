@@ -860,8 +860,7 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 		SrcAddr:     localEIP,
 		DstAddr:     egressVIP,
 	})
-	outerH.SetChecksum(0)
-	outerH.SetChecksum(^header.Checksum(outerPktBuf[:outerHeaderLen], 0))
+	outerH.SetChecksum(^outerH.CalculateChecksum())
 	
 	// Copy inner packet after outer header
 	copy(outerPktBuf[outerHeaderLen:], innerPkt)
@@ -873,6 +872,7 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	defer outerPktBufPtr.DecRef()
 
 	// Find route for the outer packet (to egress VIP)
+	// Use FindRoute which will go through normal routing (RouteSelector will return empty for mesh addresses)
 	stk := e.protocol.stack
 	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressVIP, ProtocolNumber, false /* multicastLoop */)
 	if err != nil {

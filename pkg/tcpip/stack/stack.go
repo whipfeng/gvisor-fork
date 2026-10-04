@@ -1541,20 +1541,45 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		}
 		
 		if decision.NeedIPIP {
-			// IPIP encapsulation: find route to egress VIP through Link NIC.
-			// The route will have NeedIPIP=true, and forwardUnicastPacket will
-			// perform the actual IPIP encapsulation.
+			// IPIP encapsulation: create route with NeedIPIP=true.
+			// forwardUnicastPacket will perform the actual IPIP encapsulation
+			// and re-route the outer packet to egressVIP.
 			egressVIP := decision.EgressVIP
 			if egressVIP != (tcpip.Address{}) {
-				// Find route to egress VIP (will match a Link NIC route)
-				// Use normal route lookup to find the best path to egress VIP
-				if r := s.findRouteRLocked(0, localAddr, egressVIP, netProto, multicastLoop); r != nil {
-					// Mark this route as needing IPIP encapsulation
-					r.NeedIPIP = true
-					r.EgressVIP = egressVIP
-					// The remoteAddr (original destination) is kept in r.routeInfo.RemoteAddress
-					// forwardUnicastPacket will use it as the inner destination
-					return r, nil
+				// Find a NIC to use (prefer mesh NIC 2)
+				var outgoingNIC *nic
+				if nic, ok := s.nics[2]; ok && nic.Enabled() {
+					outgoingNIC = nic
+				} else {
+					// Fallback: use any enabled NIC
+					for _, nic := range s.nics {
+						if nic.Enabled() {
+							outgoingNIC = nic
+							break
+						}
+					}
+				}
+				
+				if outgoingNIC != nil {
+					// Get a local address endpoint for this NIC
+					if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+						// Create route with NeedIPIP=true
+						r := makeRoute(
+							netProto,
+							egressVIP, /* gateway - egress VIP */
+							localAddr,
+							remoteAddr, /* original destination (inner packet) */
+							outgoingNIC,
+							outgoingNIC,
+							addressEndpoint,
+							s.handleLocal,
+							multicastLoop,
+							0, /* mtu */
+							true, /* needIPIP */
+							egressVIP, /* egressVIP */
+						)
+						return r, nil
+					}
 				}
 			}
 			// Fall through to normal routing if no route to egress VIP
