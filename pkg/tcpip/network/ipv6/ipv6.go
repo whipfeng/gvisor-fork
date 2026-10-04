@@ -1373,11 +1373,9 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 		return
 	}
 
-	// Phaethon patch #2: Forwarding-first semantics.
-	// Try forwarding before local delivery. This is critical for bypass gateway
-	// scenarios where packets arrive on one NIC destined for an address owned by
-	// the stack, but need to be forwarded out another NIC (e.g., for SNAT).
-	if e.Forwarding() {
+	// Phaethon patch #2b (§6.7): Forwarding-first with local-delivery override
+	// (mirrors ipv4.go — see that comment for the rationale).
+	if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		e.deliverPacketLocally(h, pkt, inNICName)

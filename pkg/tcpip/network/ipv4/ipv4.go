@@ -785,15 +785,28 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	// must be forwarded (not delivered locally) so they can undergo SNAT.
 	// The route table lookup below will handle routing correctly.
 
-	// Phaethon patch #6: Use pkt.OutputNICName for DNAT reply routing.
-	// If the packet has a preferred output NIC (set during DNAT based on
-	// conntrack's originalInputNIC), use that NIC ID for route lookup.
-	var nicID tcpip.NICID
+	// Phaethon patch #6 (§6.9 completion): Use pkt.OutputNICName for DNAT reply
+	// routing. If the packet has a preferred output NIC (set during DNAT based
+	// on conntrack's originalInputNIC), route directly through that NIC —
+	// bypassing both the RouteSelector and the route table, since the host-LAN
+	// prefix intentionally has no route entry (design §1.2).
 	if pkt.OutputNICName != "" {
-		nicID = stk.FindNICIDFromName(pkt.OutputNICName)
+		if nicID := stk.FindNICIDFromName(pkt.OutputNICName); nicID != 0 {
+			r, err := stk.FindRouteViaNIC(nicID, dstAddr, ProtocolNumber, false /* multicastLoop */)
+			switch err.(type) {
+			case nil:
+			case *tcpip.ErrHostUnreachable, *tcpip.ErrNetworkUnreachable, *tcpip.ErrUnknownNICID:
+				_ = e.protocol.returnError(&icmpReasonNetworkUnreachable{}, pkt, false /* deliveredLocally */)
+				return &ip.ErrHostUnreachable{}
+			default:
+				return &ip.ErrOther{Err: err}
+			}
+			defer r.Release()
+			return e.forwardPacketWithRoute(r, pkt, false /* updateOptions */)
+		}
 	}
 
-	r, err := stk.FindRoute(nicID, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
+	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
 	// TODO(https://gvisor.dev/issues/8105): We should not observe ErrHostUnreachable from route
@@ -1217,16 +1230,13 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 		return
 	}
 
-	// Before we do any processing, check if the packet was received as some
-	// sort of broadcast.
-	//
-	// If the packet is destined for this device, then it should be delivered
-	// locally. Otherwise, if forwarding is enabled, it should be forwarded.
-	// Phaethon patch #2: Forwarding-first semantics.
-	// Try forwarding before local delivery. This is critical for bypass gateway
-	// scenarios where packets arrive on one NIC destined for an address owned by
-	// the stack, but need to be forwarded out another NIC (e.g., for SNAT).
-	if e.Forwarding() {
+	// Phaethon patch #2b (§6.7): Forwarding-first with local-delivery override.
+	// Forward before local delivery, EXCEPT for destinations the RouteSelector
+	// marks LocalDelivery (fakeIP / local GIP / local VIP) — those must reach
+	// the transport demuxer, otherwise fakeIP traffic is forwarded back out
+	// the TUN (livelock). With NIC promiscuous mode, unbound destinations
+	// (fakeIP) acquire temporary endpoints and deliver locally.
+	if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
