@@ -490,7 +490,7 @@ func (it *IPTables) CheckOutput(pkt *PacketBuffer, r *Route, outNicName string) 
 // that it does not allocate. Note that called functions (e.g.
 // getConnAndUpdate) can allocate.
 // +checkescape
-func (it *IPTables) CheckPostrouting(pkt *PacketBuffer, r *Route, addressEP AddressableEndpoint, outNicName string) bool {
+func (it *IPTables) CheckPostrouting(pkt *PacketBuffer, r *Route, addressEP AddressableEndpoint, inNicName, outNicName string) bool {
 	tables := [...]checkTable{ // escapes: on arm this causes an allocation.
 		{
 			fn:      check,
@@ -507,7 +507,7 @@ func (it *IPTables) CheckPostrouting(pkt *PacketBuffer, r *Route, addressEP Addr
 	}
 
 	for _, table := range tables {
-		if !table.fn(it, table.table, Postrouting, pkt, r, addressEP, "" /* inNicName */, outNicName) {
+		if !table.fn(it, table.table, Postrouting, pkt, r, addressEP, inNicName, outNicName) {
 			return false
 		}
 	}

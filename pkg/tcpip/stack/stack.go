@@ -66,6 +66,30 @@ type ResumableEndpoint interface {
 
 var netRawMissingLogger = log.BasicRateLimitedLogger(time.Minute)
 
+// RouteDecision represents the decision made by RouteSelector.
+// It allows custom routing logic to override normal route table lookup.
+type RouteDecision struct {
+	// NeedIPIP indicates whether the packet needs IPIP encapsulation.
+	NeedIPIP bool
+
+	// EgressVIP is the VIP of the egress node for IPIP encapsulation.
+	// Only valid when NeedIPIP is true.
+	EgressVIP tcpip.Address
+
+	// Cacheable indicates whether this decision can be cached.
+	// Set to false for dynamic routing decisions (e.g., load-based).
+	Cacheable bool
+
+	// LocalDelivery indicates the packet should be delivered locally
+	// (e.g., to Forwarder for fakeIP destinations).
+	LocalDelivery bool
+}
+
+// RouteSelector is a callback function that makes routing decisions
+// during FindRoute. It can override normal route table lookup for
+// special cases like fakeIP, IPIP encapsulation, etc.
+type RouteSelector func(dst tcpip.Address) RouteDecision
+
 // Stack is a networking stack, with all supported protocols, NICs, and route
 // table.
 //
@@ -176,6 +200,11 @@ type Stack struct {
 
 	// saveRestoreEnabled indicates whether the stack is saved and restored.
 	saveRestoreEnabled bool
+
+	// routeSelector is an optional callback for custom routing decisions.
+	// If set, it's called during FindRoute to handle special cases like
+	// fakeIP local delivery, IPIP encapsulation, etc.
+	routeSelector RouteSelector `state:"nosave"`
 }
 
 // NetworkProtocolFactory instantiates a network protocol.
@@ -519,6 +548,15 @@ func (s *Stack) SetTransportProtocolHandler(p tcpip.TransportProtocolNumber, h f
 	if state != nil {
 		state.defaultHandler = h
 	}
+}
+
+// SetRouteSelector sets the route selector callback.
+// The callback is invoked during FindRoute to make custom routing decisions
+// for special cases like fakeIP local delivery, IPIP encapsulation, etc.
+func (s *Stack) SetRouteSelector(rs RouteSelector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routeSelector = rs
 }
 
 // Clock returns the Stack's clock for retrieving the current time and
@@ -1473,11 +1511,31 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	isLoopback := header.IsV4LoopbackAddress(remoteAddr) || header.IsV6LoopbackAddress(remoteAddr)
 	needRoute := !(isLocalBroadcast || isMulticast || isLinkLocal || isLoopback)
 
-	if s.handleLocal && !isMulticast && !isLocalBroadcast {
-		if r := s.findLocalRouteRLocked(id, localAddr, remoteAddr, netProto); r != nil {
-			return r, nil
+	// Phaethon patch #3: Call RouteSelector if set.
+	// This allows custom routing decisions for special cases like fakeIP
+	// local delivery, IPIP encapsulation, etc.
+	if s.routeSelector != nil {
+		decision := s.routeSelector(remoteAddr)
+		
+		if decision.LocalDelivery {
+			// TODO: Implement local delivery route creation
+			// For now, fall through to normal routing
+			_ = decision
+		}
+		
+		if decision.NeedIPIP {
+			// TODO: Implement IPIP encapsulation route creation
+			// For now, fall through to normal routing
+			_ = decision
 		}
 	}
+
+	// Phaethon patch #1: Route table lookup BEFORE local route check.
+	// This ensures explicit forwarding routes (longest-prefix-match) take
+	// precedence over connected/local routes that short-circuit via
+	// findLocalRouteRLocked. Without this, a stack-owned address (e.g. fakeIP)
+	// would cause FindRoute to return a local route even when the route table
+	// has a more specific forwarding entry.
 
 	// If the interface is specified and we do not need a route, return a route
 	// through the interface if the interface is valid and enabled.
@@ -1601,6 +1659,14 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 			if r := s.findRouteWithLocalAddrFromAnyInterfaceRLocked(nic, localAddr, remoteAddr, chosenRoute.SourceHint, gateway, netProto, multicastLoop, chosenRoute.MTU); r != nil {
 				return r, nil
 			}
+		}
+	}
+
+	// Phaethon patch #1: Local route check is now AFTER route table lookup.
+	// Only fall through to local route if no route table entry matched.
+	if s.handleLocal && !isMulticast && !isLocalBroadcast {
+		if r := s.findLocalRouteRLocked(id, localAddr, remoteAddr, netProto); r != nil {
+			return r, nil
 		}
 	}
 
@@ -2287,6 +2353,20 @@ func (s *Stack) FindNICNameFromID(id tcpip.NICID) string {
 	}
 
 	return nic.Name()
+}
+
+// FindNICIDFromName returns the NICID for the given NIC name.
+// Returns 0 if no NIC with that name exists.
+func (s *Stack) FindNICIDFromName(name string) tcpip.NICID {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for id, nic := range s.nics {
+		if nic.Name() == name {
+			return id
+		}
+	}
+	return 0
 }
 
 // ParseResult indicates the result of a parsing attempt.

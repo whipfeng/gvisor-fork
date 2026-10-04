@@ -154,6 +154,15 @@ type PacketBuffer struct {
 	// NICID is the ID of the last interface the network packet was handled at.
 	NICID tcpip.NICID
 
+	// InputNICName is the name of the input interface where the packet entered
+	// the stack. Used for NAT rules that need to match on input interface.
+	InputNICName string
+
+	// OutputNICName is the desired output interface for DNAT reply packets.
+	// Set during DNAT based on conntrack's originalInputNIC to ensure reply
+	// packets exit through the correct interface.
+	OutputNICName string
+
 	// RXChecksumValidated indicates that checksum verification may be
 	// safely skipped.
 	RXChecksumValidated bool
@@ -388,6 +397,8 @@ func (pk *PacketBuffer) Clone() *PacketBuffer {
 	newPk.TransportProtocolNumber = pk.TransportProtocolNumber
 	newPk.PktType = pk.PktType
 	newPk.NICID = pk.NICID
+	newPk.InputNICName = pk.InputNICName
+	newPk.OutputNICName = pk.OutputNICName
 	newPk.RXChecksumValidated = pk.RXChecksumValidated
 	newPk.NetworkPacketInfo = pk.NetworkPacketInfo
 	newPk.tuple = pk.tuple

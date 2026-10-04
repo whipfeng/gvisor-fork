@@ -571,8 +571,10 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 	// Postrouting NAT can only change the source address, and does not alter the
 	// route or outgoing interface of the packet.
+	inNicName := e.protocol.stack.FindNICNameFromID(pkt.NICID)
 	outNicName := e.protocol.stack.FindNICNameFromID(e.nic.ID())
-	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, r, e, outNicName); !ok {
+	pkt.InputNICName = inNicName
+	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, r, e, inNicName, outNicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
 		return nil
@@ -778,22 +780,20 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 
 	stk := e.protocol.stack
 
-	// Check if the destination is owned by the stack.
-	if ep := e.protocol.findEndpointWithAddress(dstAddr); ep != nil {
-		inNicName := stk.FindNICNameFromID(e.nic.ID())
-		outNicName := stk.FindNICNameFromID(ep.nic.ID())
-		if ok := stk.IPTables().CheckForward(pkt, inNicName, outNicName); !ok {
-			// iptables is telling us to drop the packet.
-			e.stats.ip.IPTablesForwardDropped.Increment()
-			return nil
-		}
+	// Phaethon patch #2: Removed findEndpointWithAddress short-circuit.
+	// In bypass gateway scenarios, packets destined for stack-owned addresses
+	// must be forwarded (not delivered locally) so they can undergo SNAT.
+	// The route table lookup below will handle routing correctly.
 
-		// The packet originally arrived on e so provide its NIC as the input NIC.
-		ep.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
-		return nil
+	// Phaethon patch #6: Use pkt.OutputNICName for DNAT reply routing.
+	// If the packet has a preferred output NIC (set during DNAT based on
+	// conntrack's originalInputNIC), use that NIC ID for route lookup.
+	var nicID tcpip.NICID
+	if pkt.OutputNICName != "" {
+		nicID = stk.FindNICIDFromName(pkt.OutputNICName)
 	}
 
-	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
+	r, err := stk.FindRoute(nicID, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
 	// TODO(https://gvisor.dev/issues/8105): We should not observe ErrHostUnreachable from route
@@ -1168,12 +1168,16 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	//
 	// If the packet is destined for this device, then it should be delivered
 	// locally. Otherwise, if forwarding is enabled, it should be forwarded.
-	if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
+	// Phaethon patch #2: Forwarding-first semantics.
+	// Try forwarding before local delivery. This is critical for bypass gateway
+	// scenarios where packets arrive on one NIC destined for an address owned by
+	// the stack, but need to be forwarded out another NIC (e.g., for SNAT).
+	if e.Forwarding() {
+		e.handleForwardingError(e.forwardUnicastPacket(pkt))
+	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
 		pkt.NetworkPacketInfo.LocalAddressBroadcast = subnet.IsBroadcast(dstAddr) || dstAddr == header.IPv4Broadcast
 		e.deliverPacketLocally(h, pkt, inNICName)
-	} else if e.Forwarding() {
-		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else {
 		stats.ip.InvalidDestinationAddressesReceived.Increment()
 	}

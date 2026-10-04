@@ -150,6 +150,13 @@ type conn struct {
 	// +checklocks:mu
 	destinationManip manipType
 
+	// originalInputNIC stores the input NIC name when SNAT was performed.
+	// This is used for DNAT return routing to ensure reply packets exit
+	// through the correct interface.
+	//
+	// +checklocks:mu
+	originalInputNIC string
+
 	stateMu stateConnRWMutex `state:"nosave"`
 	// tcb is TCB control block. It is used to keep track of states
 	// of tcp connection.
@@ -175,6 +182,14 @@ func (cn *conn) timedOut(now tcpip.MonotonicTime) bool {
 	// Use the same default as Linux, which lets connections in most states
 	// other than established remain for <= 120 seconds.
 	return now.Sub(cn.lastUsed) > unestablishedTimeout
+}
+
+// OriginalInputNIC returns the input NIC name recorded during SNAT.
+// This is used for DNAT return routing.
+func (cn *conn) OriginalInputNIC() string {
+	cn.mu.RLock()
+	defer cn.mu.RUnlock()
+	return cn.originalInputNIC
 }
 
 // update the connection tracking state.
@@ -785,6 +800,12 @@ func (cn *conn) performNAT(pkt *PacketBuffer, hook Hook, r *Route, portsOrIdents
 		return
 	}
 	*manip = manipPerformed
+	
+	// Record the input NIC for SNAT so DNAT reply packets can be routed correctly.
+	if !dnat && pkt.InputNICName != "" {
+		cn.originalInputNIC = pkt.InputNICName
+	}
+	
 	if changeAddress {
 		*address = natAddress
 	}
@@ -943,6 +964,15 @@ func (cn *conn) handlePacket(pkt *PacketBuffer, hook Hook, rt *Route) bool {
 	if dnat {
 		newPort = tid.srcPortOrEchoRequestIdent
 		newAddr = tid.srcAddr
+		
+		// For DNAT reply packets, set the output NIC based on the original input NIC
+		// recorded during SNAT. This ensures reply packets exit through the correct
+		// interface even when the destination is an arbitrary IP.
+		if reply {
+			cn.mu.RLock()
+			pkt.OutputNICName = cn.originalInputNIC
+			cn.mu.RUnlock()
+		}
 	}
 
 	rewritePacket(
