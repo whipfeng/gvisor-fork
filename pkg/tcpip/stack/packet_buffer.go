@@ -478,6 +478,14 @@ func (pk *PacketBuffer) DeepCopyForForwarding(reservedHeaderBytes int) *PacketBu
 
 	newPk.tuple = pk.tuple
 
+	// Phaethon: preserve NIC identity through forwarding copies so that
+	// Postrouting InputInterface matching (pkt.InputNICName from pkt.NICID),
+	// conntrack OriginalInputNIC recording and DNAT reply routing
+	// (OutputNICName) all see the interface the flow entered on.
+	newPk.NICID = pk.NICID
+	newPk.InputNICName = pk.InputNICName
+	newPk.OutputNICName = pk.OutputNICName
+
 	return newPk
 }
 
