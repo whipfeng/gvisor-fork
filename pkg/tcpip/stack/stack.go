@@ -70,6 +70,12 @@ var netRawMissingLogger = log.BasicRateLimitedLogger(time.Minute)
 // RouteDecision represents the decision made by RouteSelector.
 // It allows custom routing logic to override normal route table lookup.
 type RouteDecision struct {
+	// EgressNIC is the NIC ID to use for sending the packet.
+	// For mesh targets: the next hop's Link NIC (direct or via Dijkstra).
+	// For non-mesh targets with NeedIPIP: the egress node's next hop Link NIC.
+	// Zero means no specific NIC (use normal routing).
+	EgressNIC tcpip.NICID
+
 	// NeedIPIP indicates whether the packet needs IPIP encapsulation.
 	NeedIPIP bool
 
@@ -1022,6 +1028,19 @@ func (s *Stack) GetNICByID(id tcpip.NICID) (*nic, tcpip.Error) {
 	return n, nil
 }
 
+// GetNICByName returns a network device associated with the specified name.
+func (s *Stack) GetNICByName(name string) (*nic, tcpip.Error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, n := range s.nics {
+		if n.name == name {
+			return n, nil
+		}
+	}
+	return nil, &tcpip.ErrNoSuchFile{}
+}
+
 // CreateNICWithOptions creates a NIC with the provided id, LinkEndpoint, and
 // NICOptions. See the documentation on type NICOptions for details on how
 // NICs can be configured.
@@ -1599,40 +1618,62 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	isLoopback := header.IsV4LoopbackAddress(remoteAddr) || header.IsV6LoopbackAddress(remoteAddr)
 	needRoute := !(isLocalBroadcast || isMulticast || isLinkLocal || isLoopback)
 
-	// Phaethon patch #3 (§6.8 revision): Call RouteSelector if set.
-	// The selector only applies to lookups with NO explicit local context —
-	// i.e. the IP forwarding path (id == 0 && localAddr == ""). All other
-	// callers carry receiving-NIC or bound-address context and must use the
-	// classic route table / early-branch logic:
-	//   - TCP accept/RST: FindRoute(inNIC, pktDst, pktSrc) — egress via the
-	//     receiving NIC, otherwise forwarder replies (dst = TUN client) are
-	//     misjudged as NeedIPIP.
-	//   - UDP Forwarder Connect: FindRoute(inNIC, "", client) — the endpoint
-	//     is not yet bound; replies must egress via the receiving NIC.
-	//   - Stack-socket unicast replies (DNSHijacker Write(To:)):
-	//     FindRoute(0, boundAddr, client) — routed via the route table.
-	//   - Stack cross-NIC dials (forwardToRemote): FindRoute(1, GIP, remote).
+	// Phaethon patch #3: Call RouteSelector if set.
+	// All FindRoute calls go through RouteSelector (no condition).
+	// Conntrack-managed return packets use FindRouteViaNIC to bypass RouteSelector.
 	// Phaethon design §2.5: Cacheable decisions are cached per destination;
 	// ClearRouteDecisionCache invalidates on topology changes.
-	if s.routeSelector != nil && id == 0 && localAddr == (tcpip.Address{}) {
-		if decision, ok := s.decisionForSelectorRLocked(remoteAddr); ok && decision.NeedIPIP {
-			// IPIP encapsulation: build a placeholder route carrying
-			// NeedIPIP/EgressEIP. The inner route is never written;
-			// forwardUnicastPacket encapsulates and re-routes the outer
-			// packet to decision.EgressEIP. Prefer NIC 1 (holds bound
-			// addresses; Link NICs bind none so getAddressEP fails there).
-			if egressEIP := decision.EgressEIP; egressEIP != (tcpip.Address{}) {
-				outgoingNIC, ok := s.nics[1]
-				if !ok || !outgoingNIC.Enabled() {
-					outgoingNIC = nil
-					for _, n := range s.nics {
-						if n.Enabled() && s.getAddressEP(n, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto) != nil {
-							outgoingNIC = n
-							break
+	if s.routeSelector != nil {
+		if decision, ok := s.decisionForSelectorRLocked(remoteAddr); ok {
+			// LocalDelivery: resolved by handleValidatedPacket (patch #2b)
+			// via RouteSelectorLocalDelivery BEFORE the forwarding path.
+			// Don't act on it here to avoid routing fakeIP back out TUN.
+			
+			// NeedIPIP: IPIP encapsulation for non-mesh targets
+			if decision.NeedIPIP {
+				// Build a placeholder route carrying NeedIPIP/EgressEIP.
+				// Use the EgressNIC specified by RouteSelector (next hop Link NIC).
+				if egressEIP := decision.EgressEIP; egressEIP != (tcpip.Address{}) {
+					outgoingNIC, ok := s.nics[decision.EgressNIC]
+					if !ok || !outgoingNIC.Enabled() {
+						// Fall back to NIC 1 if EgressNIC is invalid
+						outgoingNIC, ok = s.nics[1]
+						if !ok || !outgoingNIC.Enabled() {
+							outgoingNIC = nil
+							for _, n := range s.nics {
+								if n.Enabled() && s.getAddressEP(n, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto) != nil {
+									outgoingNIC = n
+									break
+								}
+							}
 						}
 					}
+					if outgoingNIC != nil {
+						if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+							return makeRoute(
+								netProto,
+								tcpip.Address{} /* gateway */,
+								localAddr,
+								remoteAddr,
+								outgoingNIC,
+								outgoingNIC,
+								addressEndpoint,
+								s.handleLocal,
+								multicastLoop,
+								0, /* mtu */
+								true, /* needIPIP */
+								egressEIP,
+							), nil
+						}
+					}
+					// Fall through to normal routing if no route to egress EIP.
 				}
-				if outgoingNIC != nil {
+			}
+			
+			// EgressNIC without NeedIPIP: mesh targets via Link NIC
+			if decision.EgressNIC != 0 && !decision.NeedIPIP {
+				outgoingNIC, ok := s.nics[decision.EgressNIC]
+				if ok && outgoingNIC.Enabled() {
 					if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
 						return makeRoute(
 							netProto,
@@ -1645,18 +1686,14 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 							s.handleLocal,
 							multicastLoop,
 							0, /* mtu */
-							true, /* needIPIP */
-							egressEIP,
+							false, /* needIPIP */
+							tcpip.Address{}, /* egressEIP */
 						), nil
 					}
 				}
-				// Fall through to normal routing if no route to egress EIP.
+				// Fall through to normal routing if EgressNIC is invalid
 			}
 		}
-		// LocalDelivery decisions are resolved by handleValidatedPacket
-		// (patch #2b, via RouteSelectorLocalDelivery) BEFORE the forwarding
-		// path ever consults the route table; acting on them here would
-		// route fakeIP traffic back out the TUN (livelock).
 	}
 
 	// Phaethon patch #1: Route table lookup BEFORE local route check.

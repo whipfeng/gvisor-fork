@@ -16,8 +16,11 @@ package stack
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"reflect"
 	"time"
 
@@ -353,6 +356,17 @@ func (it *IPTables) CheckPrerouting(pkt *PacketBuffer, addressEP AddressableEndp
 	}
 
 	pkt.tuple = it.connections.getConnAndUpdate(pkt, false /* skipChecksumValidation */)
+	
+	// Debug: log pkt.tuple after getConnAndUpdate
+	if pkt.TransportProtocolNumber == header.UDPProtocolNumber {
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		logPath := filepath.Join(os.TempDir(), "phaethon-prerouting-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[PREROUTING-DEBUG] UDP pkt: src=%s dst=%s inNic=%s tuple=%v\n", hdr.SourceAddress(), hdr.DestinationAddress(), inNicName, pkt.tuple != nil)
+			f.Close()
+		}
+	}
 
 	for _, table := range tables {
 		if !table.fn(it, table.table, Prerouting, pkt, nil /* route */, addressEP, inNicName, "" /* outNicName */) {
@@ -393,6 +407,25 @@ func (it *IPTables) CheckInput(pkt *PacketBuffer, inNicName string) bool {
 	for _, table := range tables {
 		if !table.fn(it, table.table, Input, pkt, nil /* route */, nil /* addressEP */, inNicName, "" /* outNicName */) {
 			return false
+		}
+	}
+
+	// Debug: log after Input hook to see if SNAT was applied
+	if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
+		netHdr := header.IPv4(pkt.NetworkHeader().Slice())
+		srcAddr := netHdr.SourceAddress()
+		dstAddr := netHdr.DestinationAddress()
+		// Log for DNS-related packets (port 53)
+		if len(pkt.TransportHeader().Slice()) >= 4 {
+			dstPort := binary.BigEndian.Uint16(pkt.TransportHeader().Slice()[2:4])
+			if dstPort == 53 || pkt.snatDone {
+				logPath := filepath.Join(os.TempDir(), "phaethon-snat-debug.log")
+				f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err == nil {
+					fmt.Fprintf(f, "[SNAT-DEBUG] After Input hook: src=%s dst=%s snatDone=%v dnatDone=%v\n", srcAddr, dstAddr, pkt.snatDone, pkt.dnatDone)
+					f.Close()
+				}
+			}
 		}
 	}
 

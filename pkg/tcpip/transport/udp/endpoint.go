@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/sync"
@@ -896,6 +898,16 @@ func (e *endpoint) Readiness(mask waiter.EventMask) waiter.EventMask {
 // HandlePacket is called by the stack when new packets arrive to this transport
 // endpoint.
 func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
+	// Debug: log for port 53
+	if id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-udp-handle-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[UDP-HANDLE-DEBUG] id=%+v rcvReady=%v rcvClosed=%v\n", id, e.rcvReady, e.rcvClosed)
+			f.Close()
+		}
+	}
+
 	// Get the header then trim it from the view.
 	hdr := header.UDP(pkt.TransportHeader().Slice())
 	netHdr := pkt.Network()
@@ -909,12 +921,28 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 		pkt.RXChecksumValidated)
 	if !lengthValid {
 		// Malformed packet.
+		if id.LocalPort == 53 {
+			logPath := filepath.Join(os.TempDir(), "phaethon-udp-drop-debug.log")
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				fmt.Fprintf(f, "[UDP-DROP-DEBUG] id=%+v reason=lengthInvalid\n", id)
+				f.Close()
+			}
+		}
 		e.stack.Stats().UDP.MalformedPacketsReceived.Increment()
 		e.stats.ReceiveErrors.MalformedPacketsReceived.Increment()
 		return
 	}
 
 	if !csumValid {
+		if id.LocalPort == 53 {
+			logPath := filepath.Join(os.TempDir(), "phaethon-udp-drop-debug.log")
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				fmt.Fprintf(f, "[UDP-DROP-DEBUG] id=%+v reason=checksumInvalid\n", id)
+				f.Close()
+			}
+		}
 		e.stack.Stats().UDP.ChecksumErrors.Increment()
 		e.stats.ReceiveErrors.ChecksumErrors.Increment()
 		return
@@ -935,6 +963,14 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	rcvBufSize := e.ops.GetReceiveBufferSize()
 	// Drop the packet if our buffer is currently full.
 	if e.frozen || e.rcvBufSize >= int(rcvBufSize) {
+		if id.LocalPort == 53 {
+			logPath := filepath.Join(os.TempDir(), "phaethon-udp-drop-debug.log")
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				fmt.Fprintf(f, "[UDP-DROP-DEBUG] id=%+v reason=bufferFull frozen=%v rcvBufSize=%d maxBufSize=%d\n", id, e.frozen, e.rcvBufSize, rcvBufSize)
+				f.Close()
+			}
+		}
 		e.rcvMu.Unlock()
 		e.stack.Stats().UDP.ReceiveBufferErrors.Increment()
 		e.stats.ReceiveErrors.ReceiveBufferOverflow.Increment()
@@ -962,6 +998,15 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	}
 	e.rcvList.PushBack(packet)
 	e.rcvBufSize += pkt.Data().Size()
+
+	if id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-udp-queue-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[UDP-QUEUE-DEBUG] id=%+v pktSize=%d rcvBufSize=%d wasEmpty=%v\n", id, pkt.Data().Size(), e.rcvBufSize, wasEmpty)
+			f.Close()
+		}
+	}
 
 	// Save any useful information from the network header to the packet.
 	packet.tosOrTClass, _ = pkt.Network().TOS()

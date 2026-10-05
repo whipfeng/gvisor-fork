@@ -18,6 +18,8 @@ package ipv4
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"time"
 
@@ -547,6 +549,19 @@ func (e *endpoint) writePacket(r *stack.Route, pkt *stack.PacketBuffer) tcpip.Er
 	// removing this check short circuits broadcasts before they are sent out to
 	// other hosts.
 	if newDstAddr := netHeader.DestinationAddress(); dstAddr != newDstAddr {
+		// If DNAT set OutputNICName, route to that NIC for egress instead of
+		// local delivery. This ensures reply packets exit through the correct
+		// interface (e.g., TUN adapter) to reach the original sender.
+		if pkt.OutputNICName != "" {
+			if outNIC, err := e.protocol.stack.GetNICByName(pkt.OutputNICName); err == nil {
+				// Find the endpoint for the output NIC
+				if outEP, ok := e.protocol.getEndpointForNIC(outNIC.ID()); ok {
+					// Route the packet through the output NIC
+					return outEP.writePacketPostRouting(r, pkt, false /* headerIncluded */)
+				}
+			}
+		}
+		// Fall back to local delivery if OutputNICName is not set or NIC not found
 		if ep := e.protocol.findEndpointWithAddress(newDstAddr); ep != nil {
 			// Since we rewrote the packet but it is being routed back to us, we
 			// can safely assume the checksum is valid.
@@ -890,12 +905,24 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	return e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
 }
 
+var handlePacketLogOnce sync.Once
+
 // HandlePacket is called by the link layer when new ipv4 packets arrive for
 // this endpoint.
 func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	stats := e.stats.ip
 
 	stats.PacketsReceived.Increment()
+
+	// One-time debug log
+	handlePacketLogOnce.Do(func() {
+		logPath := filepath.Join(os.TempDir(), "phaethon-handlepacket-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[HANDLEPACKET-DEBUG] NIC ID=%d name=%s isLoopback=%v\n", e.nic.ID(), e.nic.Name(), e.nic.IsLoopback())
+			f.Close()
+		}
+	})
 
 	if !e.isEnabled() {
 		stats.DisabledPacketsReceived.Increment()
@@ -1290,8 +1317,19 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats.Forwarding.Errors.Increment()
 }
 
+var checkInputLogOnce sync.Once
+
 func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, inNICName string) {
 	stats := e.stats
+	// One-time debug log for CheckInput
+	checkInputLogOnce.Do(func() {
+		logPath := filepath.Join(os.TempDir(), "phaethon-checkinput-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[CHECKINPUT-DEBUG] deliverPacketLocally called: inNICName=%s src=%s dst=%s\n", inNICName, h.SourceAddress(), h.DestinationAddress())
+			f.Close()
+		}
+	})
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
 	if ok := e.protocol.stack.IPTables().CheckInput(pkt, inNICName); !ok {

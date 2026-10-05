@@ -17,6 +17,9 @@ package stack
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"sync"
 
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -348,15 +351,41 @@ func natAction(pkt *PacketBuffer, hook Hook, r *Route, portsOrIdents portOrIdent
 	}
 
 	if t := pkt.tuple; t != nil {
+		// Debug: log before NAT
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		srcBefore := hdr.SourceAddress()
+		
 		t.conn.performNAT(pkt, hook, r, portsOrIdents, address, dnat, changePort, changeAddress)
+		
+		// Debug: log after NAT
+		srcAfter := hdr.SourceAddress()
+		logPath := filepath.Join(os.TempDir(), "phaethon-nat-action-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[NAT-ACTION-DEBUG] hook=%d srcBefore=%s srcAfter=%s targetAddr=%s tuple=%v\n", hook, srcBefore, srcAfter, address, t != nil)
+			f.Close()
+		}
+		
 		return RuleAccept, 0
 	}
 
 	return RuleDrop, 0
 }
 
+var snatLogOnce sync.Once
+
 // Action implements Target.Action.
 func (st *SNATTarget) Action(pkt *PacketBuffer, hook Hook, r *Route, _ AddressableEndpoint) (RuleVerdict, int) {
+	// One-time debug log
+	snatLogOnce.Do(func() {
+		logPath := filepath.Join(os.TempDir(), "phaethon-snat-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[SNAT-DEBUG] SNATTarget.Action called: hook=%d addr=%s changeAddr=%v\n", hook, st.Addr, st.ChangeAddress)
+			f.Close()
+		}
+	})
+
 	// Sanity check.
 	if st.NetworkProtocol != pkt.NetworkProtocolNumber {
 		panic(fmt.Sprintf(

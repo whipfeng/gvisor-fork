@@ -16,6 +16,8 @@ package stack
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
@@ -160,6 +162,17 @@ func (epsByNIC *endpointsByNIC) transportEndpoints() []TransportEndpoint {
 // endpoint. It returns false if the packet could not be matched to any
 // transport endpoint, true otherwise.
 func (epsByNIC *endpointsByNIC) handlePacket(id TransportEndpointID, pkt *PacketBuffer) bool {
+	// Debug: log handlePacket for UDP port 53
+	if id.LocalPort == 53 && pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		logPath := filepath.Join(os.TempDir(), "phaethon-demux-handle-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[DEMUX-HANDLE-DEBUG] NICID=%d id=%+v src=%s dst=%s\n", pkt.NICID, id, hdr.SourceAddress(), hdr.DestinationAddress())
+			f.Close()
+		}
+	}
+
 	epsByNIC.mu.RLock()
 
 	mpep, ok := epsByNIC.endpoints[pkt.NICID]
@@ -172,13 +185,33 @@ func (epsByNIC *endpointsByNIC) handlePacket(id TransportEndpointID, pkt *Packet
 
 	// If this is a broadcast or multicast datagram, deliver the datagram to all
 	// endpoints bound to the right device.
-	if isInboundMulticastOrBroadcast(pkt, id.LocalAddress) {
+	isMulticast := isInboundMulticastOrBroadcast(pkt, id.LocalAddress)
+	if id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-multicast-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[MULTICAST-DEBUG] id=%+v isMulticast=%v LocalAddressBroadcast=%v\n", id, isMulticast, pkt.NetworkPacketInfo.LocalAddressBroadcast)
+			f.Close()
+		}
+	}
+	if isMulticast {
 		mpep.handlePacketAll(id, pkt)
 		epsByNIC.mu.RUnlock() // Don't use defer for performance reasons.
 		return true
 	}
 	// multiPortEndpoints are guaranteed to have at least one element.
 	transEP := mpep.selectEndpoint(id, epsByNIC.seed)
+
+	// Debug: log selected endpoint for port 53
+	if id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-demux-select-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[DEMUX-SELECT-DEBUG] id=%+v transEP=%T mpep.endpoints=%d\n", id, transEP, len(mpep.endpoints))
+			f.Close()
+		}
+	}
+
 	if queuedProtocol, mustQueue := mpep.demux.queuedProtocols[protocolIDs{mpep.netProto, mpep.transProto}]; mustQueue {
 		queuedProtocol.QueuePacket(transEP, id, pkt)
 		epsByNIC.mu.RUnlock()
@@ -594,6 +627,32 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 	eps.mu.RLock()
 	ep := eps.findEndpointLocked(id)
 	eps.mu.RUnlock()
+
+	// Debug: log for UDP port 53
+	if protocol == header.UDPProtocolNumber && id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-deliver-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "[DELIVER-DEBUG] id=%+v foundEP=%v\n", id, ep != nil)
+			f.Close()
+		}
+	}
+
+	// Debug: log all registered endpoint IDs for port 53
+	if protocol == header.UDPProtocolNumber && id.LocalPort == 53 {
+		logPath := filepath.Join(os.TempDir(), "phaethon-registered-eps-debug.log")
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			eps.mu.RLock()
+			fmt.Fprintf(f, "[REGISTERED-EPS-DEBUG] total endpoints for UDP: %d\n", len(eps.endpoints))
+			for epid := range eps.endpoints {
+				fmt.Fprintf(f, "[REGISTERED-EPS-DEBUG]   epid=%+v\n", epid)
+			}
+			eps.mu.RUnlock()
+			f.Close()
+		}
+	}
+
 	if ep == nil {
 		if protocol == header.UDPProtocolNumber {
 			d.stack.stats.UDP.UnknownPortErrors.Increment()
