@@ -1172,7 +1172,12 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 		return
 	}
 
-	e.handleValidatedPacket(h, pkt, e.nic.Name() /* inNICName */)
+	// Phaethon patch #7: align with Linux semantics — locally-generated
+	// socket traffic does not enter the INPUT chain via an interface, so
+	// we pass an empty inNICName here. The external-receive path
+	// (HandlePacket) still passes e.nic.Name() so that filters using
+	// `-i <nic>` correctly match only externally-received packets.
+	e.handleValidatedPacket(h, pkt, "" /* inNICName */)
 }
 
 // forwardMulticastPacket validates a multicast pkt and attempts to forward it.
