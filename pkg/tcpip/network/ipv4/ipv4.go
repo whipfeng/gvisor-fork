@@ -1310,14 +1310,23 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	case *ip.ErrOutgoingDeviceNoBufferSpace:
 		stats.Forwarding.OutgoingDeviceNoBufferSpace.Increment()
 	case *ip.ErrOther:
-		switch err := err.Err.(type) {
+		// Phaethon patch #8: unknown wrapped tcpip error — log and silently drop
+		// instead of panicking. forwardPacketWithRoute wraps the underlying
+		// writePacketPostRouting error in *ip.ErrOther; previously any
+		// unrecognized inner error (e.g. *tcpip.ErrHostUnreachable from
+		// FindRoute failure on non-mesh external IP) would panic the whole
+		// netstack process. The recovery is also achieved by Branch 4 setting
+		// LocalDelivery=true, but the panic defense here is the belt-and-suspenders
+		// guard against future gVisor upgrades introducing new error types.
+		switch innerErr := err.Err.(type) {
 		case *tcpip.ErrClosedForSend:
 			stats.Forwarding.OutgoingDeviceClosedForSend.Increment()
 		default:
-			panic(fmt.Sprintf("unrecognized tcpip forwarding error: %s", err))
+			log.Warningf("ipv4.handleForwardingError: unrecognized tcpip forwarding error: %s", innerErr)
 		}
 	default:
-		panic(fmt.Sprintf("unrecognized forwarding error: %s", err))
+		// Phaethon patch #8: same as above — log + drop, no panic.
+		log.Warningf("ipv4.handleForwardingError: unrecognized forwarding error: %s", err)
 	}
 	stats.Forwarding.Errors.Increment()
 }
@@ -1337,6 +1346,17 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	})
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
+	// Phaethon patch #11: record the input NIC on the packet so that
+	// conntrack's performNAT (conntrack.go) can capture originalInputNIC
+	// for Input-chain-matched connections too, not just Postrouting-chain
+	// (forwarded) ones. Without this, DNAT reply packets for locally
+	// delivered flows (DNS hijacker, Forwarder) never get OutputNICName
+	// populated, so writePacket falls back to a second RouteSelector
+	// lookup on the post-NAT destination and can be mis-delivered to the
+	// generic UDP forwarder instead of exiting via the original NIC.
+	if pkt.InputNICName == "" && inNICName != "" {
+		pkt.InputNICName = inNICName
+	}
 	if ok := e.protocol.stack.IPTables().CheckInput(pkt, inNICName); !ok {
 		// iptables is telling us to drop the packet.
 		stats.ip.IPTablesInputDropped.Increment()

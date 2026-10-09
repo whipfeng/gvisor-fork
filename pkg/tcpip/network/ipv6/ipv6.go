@@ -24,6 +24,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -1319,14 +1320,23 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	case *ip.ErrOutgoingDeviceNoBufferSpace:
 		stats.Forwarding.OutgoingDeviceNoBufferSpace.Increment()
 	case *ip.ErrOther:
-		switch err := err.Err.(type) {
+		// Phaethon patch #8: unknown wrapped tcpip error — log and silently drop
+		// instead of panicking. Mirror of ipv4.go handleForwardingError patch #8
+		// (see design §6.11). Previously any unrecognized inner error (e.g.
+		// *tcpip.ErrHostUnreachable from FindRoute failure on non-mesh external
+		// IPv6) would panic the whole netstack process. The recovery is also
+		// achieved by Branch 4 setting LocalDelivery=true, but the panic defense
+		// here is the belt-and-suspenders guard against future gVisor upgrades
+		// introducing new error types.
+		switch innerErr := err.Err.(type) {
 		case *tcpip.ErrClosedForSend:
 			stats.Forwarding.OutgoingDeviceClosedForSend.Increment()
 		default:
-			panic(fmt.Sprintf("unrecognized tcpip forwarding error: %s", err))
+			log.Warningf("ipv6.handleForwardingError: unrecognized tcpip forwarding error: %s", innerErr)
 		}
 	default:
-		panic(fmt.Sprintf("unrecognized forwarding error: %s", err))
+		// Phaethon patch #8: same as above — log + drop, no panic.
+		log.Warningf("ipv6.handleForwardingError: unrecognized forwarding error: %s", err)
 	}
 	stats.Forwarding.Errors.Increment()
 }
@@ -1394,6 +1404,12 @@ func (e *endpoint) deliverPacketLocally(h header.IPv6, pkt *stack.PacketBuffer, 
 
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and need not be forwarded.
+	// Phaethon patch #11: mirror ipv4.go's fix — record the input NIC on
+	// the packet so conntrack's performNAT can capture originalInputNIC
+	// for Input-chain-matched connections too.
+	if pkt.InputNICName == "" && inNICName != "" {
+		pkt.InputNICName = inNICName
+	}
 	if ok := e.protocol.stack.IPTables().CheckInput(pkt, inNICName); !ok {
 		// iptables is telling us to drop the packet.
 		stats.IPTablesInputDropped.Increment()
