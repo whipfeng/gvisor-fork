@@ -115,8 +115,8 @@ func (r *Route) Loop() PacketLooping {
 	return r.routeInfo.Loop
 }
 
-// setLocalLoopback forces the route to loop the packet back into the stack
-// instead of writing it to the egress NIC (Phaethon patch #10).
+// setLocalStack forces the route to loop the packet back into the stack
+// instead of writing it to the egress NIC (Phaethon patch #12).
 //
 // Clearing PacketOut makes writePacketPostRouting return right after
 // handleLocalPacket, which also skips the postrouting iptables hook — a
@@ -127,7 +127,7 @@ func (r *Route) Loop() PacketLooping {
 //
 // Must be called before the Route is shared with any other goroutine, i.e.
 // from FindRoute immediately after construction.
-func (r *Route) setLocalLoopback() {
+func (r *Route) setLocalStack() {
 	r.routeInfo.Loop = PacketLoop
 }
 
@@ -196,7 +196,7 @@ func constructAndValidateRoute(netProto tcpip.NetworkProtocolNumber, addressEndp
 		handleLocal,
 		multicastLoop,
 		mtu,
-		false, /* needIPIP */
+		false,           /* needIPIP */
 		tcpip.Address{}, /* egressEIP */
 	)
 
@@ -235,7 +235,7 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 	// Phaethon: Set IPIP encapsulation fields
 	r.NeedIPIP = needIPIP
 	r.EgressEIP = egressEIP
-	
+
 	if r.Loop()&PacketOut == 0 {
 		// Packet will not leave the stack, no need for a gateway or a remote link
 		// address.

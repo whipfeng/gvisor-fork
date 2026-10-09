@@ -1263,13 +1263,11 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 		return
 	}
 
-	// Phaethon patch #2b (§6.7): Forwarding-first with local-delivery override.
-	// Forward before local delivery, EXCEPT for destinations the RouteSelector
-	// marks LocalDelivery (fakeIP / local GIP / local VIP) — those must reach
-	// the transport demuxer, otherwise fakeIP traffic is forwarded back out
-	// the TUN (livelock). With NIC promiscuous mode, unbound destinations
-	// (fakeIP) acquire temporary endpoints and deliver locally.
-	if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
+	// Phaethon patch #12: forwarding is the default. LocalStack destinations
+	// reach the local transport demuxer, while conntrack-marked return packets
+	// always forward through OutputNICName after reverse NAT restores the client
+	// destination. This bypasses destination policy for per-flow return routing.
+	if e.Forwarding() && (pkt.OutputNICName != "" || !e.protocol.stack.RouteSelectorLocalStack(dstAddr)) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
@@ -1315,9 +1313,8 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 		// writePacketPostRouting error in *ip.ErrOther; previously any
 		// unrecognized inner error (e.g. *tcpip.ErrHostUnreachable from
 		// FindRoute failure on non-mesh external IP) would panic the whole
-		// netstack process. The recovery is also achieved by Branch 4 setting
-		// LocalDelivery=true, but the panic defense here is the belt-and-suspenders
-		// guard against future gVisor upgrades introducing new error types.
+		// netstack process. Branch 4 now uses LocalStack, but this panic defense
+		// remains a guard against future gVisor upgrades introducing new errors.
 		switch innerErr := err.Err.(type) {
 		case *tcpip.ErrClosedForSend:
 			stats.Forwarding.OutgoingDeviceClosedForSend.Increment()

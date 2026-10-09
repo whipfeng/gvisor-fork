@@ -1008,15 +1008,25 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 		return &ip.ErrParameterProblem{}
 	}
 
-	// Phaethon patch #6: Use pkt.OutputNICName for DNAT reply routing.
-	// If the packet has a preferred output NIC (set during DNAT based on
-	// conntrack's originalInputNIC), use that NIC ID for route lookup.
-	var nicID tcpip.NICID
+	// Phaethon patch #12: conntrack return packets must bypass RouteSelector
+	// and use their recorded input NIC directly, matching IPv4's behavior.
 	if pkt.OutputNICName != "" {
-		nicID = stk.FindNICIDFromName(pkt.OutputNICName)
+		if nicID := stk.FindNICIDFromName(pkt.OutputNICName); nicID != 0 {
+			r, err := stk.FindRouteViaNIC(nicID, dstAddr, ProtocolNumber, false /* multicastLoop */)
+			switch err.(type) {
+			case nil:
+			case *tcpip.ErrHostUnreachable, *tcpip.ErrNetworkUnreachable, *tcpip.ErrUnknownNICID:
+				_ = e.protocol.returnError(&icmpReasonNetUnreachable{}, pkt, false /* deliveredLocally */)
+				return &ip.ErrHostUnreachable{}
+			default:
+				return &ip.ErrOther{Err: err}
+			}
+			defer r.Release()
+			return e.forwardPacketWithRoute(r, pkt)
+		}
 	}
 
-	r, err := stk.FindRoute(nicID, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
+	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
 	// TODO(https://gvisor.dev/issues/8105): We should not observe ErrHostUnreachable from route
@@ -1324,10 +1334,9 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 		// instead of panicking. Mirror of ipv4.go handleForwardingError patch #8
 		// (see design §6.11). Previously any unrecognized inner error (e.g.
 		// *tcpip.ErrHostUnreachable from FindRoute failure on non-mesh external
-		// IPv6) would panic the whole netstack process. The recovery is also
-		// achieved by Branch 4 setting LocalDelivery=true, but the panic defense
-		// here is the belt-and-suspenders guard against future gVisor upgrades
-		// introducing new error types.
+		// IPv6) would panic the whole netstack process. Branch 4 now uses
+		// LocalStack, but this panic defense remains a guard against future
+		// gVisor upgrades introducing new errors.
 		switch innerErr := err.Err.(type) {
 		case *tcpip.ErrClosedForSend:
 			stats.Forwarding.OutgoingDeviceClosedForSend.Increment()
@@ -1388,9 +1397,9 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 		return
 	}
 
-	// Phaethon patch #2b (§6.7): Forwarding-first with local-delivery override
-	// (mirrors ipv4.go — see that comment for the rationale).
-	if e.Forwarding() && !e.protocol.stack.RouteSelectorLocalDelivery(dstAddr) {
+	// Phaethon patch #12: mirrors IPv4. Conntrack-marked return packets
+	// forward through OutputNICName before any destination local-stack policy.
+	if e.Forwarding() && (pkt.OutputNICName != "" || !e.protocol.stack.RouteSelectorLocalStack(dstAddr)) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		e.deliverPacketLocally(h, pkt, inNICName)

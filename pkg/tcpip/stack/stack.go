@@ -89,26 +89,12 @@ type RouteDecision struct {
 	// Set to false for dynamic routing decisions (e.g., load-based).
 	Cacheable bool
 
-	// LocalDelivery indicates the packet should be delivered locally
-	// (e.g., to Forwarder for fakeIP destinations).
-	//
-	// Inbound semantics only: consumed by handleValidatedPacket (Phaethon
-	// patch #2b) so that a packet arriving on a NIC is consumed locally
-	// instead of being forwarded. FindRoute never reads it.
-	LocalDelivery bool
-
-	// LocalLoopback indicates that a locally-generated packet should be
-	// delivered back into the stack instead of being written to the egress
-	// NIC (Phaethon patch #10).
-	//
-	// Outbound semantics only: consumed by FindRoute, which sets the
-	// returned Route's Loop to PacketLoop so that writePacketPostRouting
-	// calls handleLocalPacket and returns before any NIC write. This makes
-	// local delivery independent of whether a TUN device exists.
-	//
-	// Kept separate from LocalDelivery because the two directions need
-	// different answers for the same destination.
-	LocalLoopback bool
+	// LocalStack indicates that this destination is a local stack service or
+	// proxy entry. Inbound packets are delivered locally; locally-generated
+	// packets are looped back in-stack instead of being written to the egress
+	// NIC. Conntrack packets with OutputNICName bypass this destination policy
+	// and always forward through the recorded NIC (Phaethon patch #12).
+	LocalStack bool
 }
 
 // RouteSelector is a callback function that makes routing decisions
@@ -658,28 +644,15 @@ func (s *Stack) decisionForSelectorRLocked(dst tcpip.Address) (RouteDecision, bo
 	return decision, true
 }
 
-// RouteSelectorLocalDelivery reports whether the RouteSelector marks dst for
-// local delivery (Phaethon design §2.3: fakeIP / local GIP / local VIP).
-// It is consulted by handleValidatedPacket (patch #2b) so that locally-owned
-// addresses are consumed locally even when forwarding is enabled, while all
-// other destinations take the forwarding-first path.
-func (s *Stack) RouteSelectorLocalDelivery(dst tcpip.Address) bool {
+// RouteSelectorLocalStack reports whether the RouteSelector marks dst as a
+// local stack service or proxy entry (Phaethon patch #12). It is used by both
+// handleValidatedPacket and FindRoute; conntrack return packets with an
+// OutputNICName bypass it and forward through their recorded NIC.
+func (s *Stack) RouteSelectorLocalStack(dst tcpip.Address) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	decision, ok := s.decisionForSelectorRLocked(dst)
-	return ok && decision.LocalDelivery
-}
-
-// RouteSelectorLocalLoopback reports whether the RouteSelector marks dst for
-// in-stack loopback of locally-generated packets (Phaethon patch #10). It is
-// consulted by FindRoute, which overrides the returned Route's Loop to
-// PacketLoop so the packet is delivered back into the stack rather than
-// written to the egress NIC.
-func (s *Stack) RouteSelectorLocalLoopback(dst tcpip.Address) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	decision, ok := s.decisionForSelectorRLocked(dst)
-	return ok && decision.LocalLoopback
+	return ok && decision.LocalStack
 }
 
 // Clock returns the Stack's clock for retrieving the current time and
@@ -1638,15 +1611,11 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 		return r, err
 	}
 
-	// Phaethon patch #10: in-stack loopback for locally-generated packets.
-	// Applied here as a single choke point rather than threaded through every
-	// makeRoute call site, because findRouteInner returns from many branches
-	// (IPIP, EgressNIC, route table, local route, fallback).
-	//
-	// The lock is not held here: findRouteInner released it on return, so
-	// RouteSelectorLocalLoopback can take it without nesting RLock.
-	if s.RouteSelectorLocalLoopback(remoteAddr) {
-		r.setLocalLoopback()
+	// Phaethon patch #12: LocalStack applies in-stack loopback to
+	// locally-generated packets. This single choke point covers every
+	// findRouteInner return path without threading a flag through makeRoute.
+	if s.RouteSelectorLocalStack(remoteAddr) {
+		r.setLocalStack()
 	}
 	return r, nil
 }
@@ -1675,10 +1644,10 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 	// ClearRouteDecisionCache invalidates on topology changes.
 	if s.routeSelector != nil {
 		if decision, ok := s.decisionForSelectorRLocked(remoteAddr); ok {
-			// LocalDelivery: resolved by handleValidatedPacket (patch #2b)
-			// via RouteSelectorLocalDelivery BEFORE the forwarding path.
-			// Don't act on it here to avoid routing fakeIP back out TUN.
-			
+			// LocalStack: FindRoute applies its loopback behavior after this
+			// function constructs a route; receive-path delivery is resolved by
+			// handleValidatedPacket before ordinary forwarding.
+
 			// NeedIPIP: IPIP encapsulation for non-mesh targets
 			if decision.NeedIPIP {
 				// Build a placeholder route carrying NeedIPIP/EgressEIP.
@@ -1702,7 +1671,7 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 						if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
 							return makeRoute(
 								netProto,
-								tcpip.Address{} /* gateway */,
+								tcpip.Address{}, /* gateway */
 								localAddr,
 								remoteAddr,
 								outgoingNIC,
@@ -1710,7 +1679,7 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 								addressEndpoint,
 								s.handleLocal,
 								multicastLoop,
-								0, /* mtu */
+								0,    /* mtu */
 								true, /* needIPIP */
 								egressEIP,
 							), nil
@@ -1719,7 +1688,7 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 					// Fall through to normal routing if no route to egress EIP.
 				}
 			}
-			
+
 			// EgressNIC without NeedIPIP: mesh targets via Link NIC
 			if decision.EgressNIC != 0 && !decision.NeedIPIP {
 				outgoingNIC, ok := s.nics[decision.EgressNIC]
@@ -1727,7 +1696,7 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 					if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
 						return makeRoute(
 							netProto,
-							tcpip.Address{} /* gateway */,
+							tcpip.Address{}, /* gateway */
 							localAddr,
 							remoteAddr,
 							outgoingNIC,
@@ -1735,8 +1704,8 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 							addressEndpoint,
 							s.handleLocal,
 							multicastLoop,
-							0, /* mtu */
-							false, /* needIPIP */
+							0,               /* mtu */
+							false,           /* needIPIP */
 							tcpip.Address{}, /* egressEIP */
 						), nil
 					}
@@ -1768,8 +1737,8 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 					addressEndpoint,
 					s.handleLocal,
 					multicastLoop,
-					0, /* mtu */
-					false, /* needIPIP */
+					0,               /* mtu */
+					false,           /* needIPIP */
 					tcpip.Address{}, /* egressEIP */
 				), nil
 			}
@@ -1924,16 +1893,16 @@ func (s *Stack) FindRouteViaNIC(id tcpip.NICID, remoteAddr tcpip.Address, netPro
 	if addressEndpoint := s.getAddressEP(nic, tcpip.Address{} /* localAddr */, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
 		return makeRoute(
 			netProto,
-			tcpip.Address{} /* gateway */,
-			tcpip.Address{} /* localAddr - filled from the endpoint; forwarded packets keep their own source */,
+			tcpip.Address{}, /* gateway */
+			tcpip.Address{}, /* localAddr - filled from the endpoint; forwarded packets keep their own source */
 			remoteAddr,
 			nic, /* outgoingNIC */
 			nic, /* localAddressNIC */
 			addressEndpoint,
 			s.handleLocal,
 			multicastLoop,
-			0, /* mtu */
-			false, /* needIPIP */
+			0,               /* mtu */
+			false,           /* needIPIP */
 			tcpip.Address{}, /* egressEIP */
 		), nil
 	}
