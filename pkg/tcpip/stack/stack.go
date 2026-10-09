@@ -91,7 +91,24 @@ type RouteDecision struct {
 
 	// LocalDelivery indicates the packet should be delivered locally
 	// (e.g., to Forwarder for fakeIP destinations).
+	//
+	// Inbound semantics only: consumed by handleValidatedPacket (Phaethon
+	// patch #2b) so that a packet arriving on a NIC is consumed locally
+	// instead of being forwarded. FindRoute never reads it.
 	LocalDelivery bool
+
+	// LocalLoopback indicates that a locally-generated packet should be
+	// delivered back into the stack instead of being written to the egress
+	// NIC (Phaethon patch #10).
+	//
+	// Outbound semantics only: consumed by FindRoute, which sets the
+	// returned Route's Loop to PacketLoop so that writePacketPostRouting
+	// calls handleLocalPacket and returns before any NIC write. This makes
+	// local delivery independent of whether a TUN device exists.
+	//
+	// Kept separate from LocalDelivery because the two directions need
+	// different answers for the same destination.
+	LocalLoopback bool
 }
 
 // RouteSelector is a callback function that makes routing decisions
@@ -651,6 +668,18 @@ func (s *Stack) RouteSelectorLocalDelivery(dst tcpip.Address) bool {
 	defer s.mu.RUnlock()
 	decision, ok := s.decisionForSelectorRLocked(dst)
 	return ok && decision.LocalDelivery
+}
+
+// RouteSelectorLocalLoopback reports whether the RouteSelector marks dst for
+// in-stack loopback of locally-generated packets (Phaethon patch #10). It is
+// consulted by FindRoute, which overrides the returned Route's Loop to
+// PacketLoop so the packet is delivered back into the stack rather than
+// written to the egress NIC.
+func (s *Stack) RouteSelectorLocalLoopback(dst tcpip.Address) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	decision, ok := s.decisionForSelectorRLocked(dst)
+	return ok && decision.LocalLoopback
 }
 
 // Clock returns the Stack's clock for retrieving the current time and
@@ -1604,6 +1633,27 @@ func (s *Stack) findRouteWithLocalAddrFromAnyInterfaceRLocked(outgoingNIC *nic, 
 // remote address is provided, the stack will use a remote address equal to the
 // local address.
 func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+	r, err := s.findRouteInner(id, localAddr, remoteAddr, netProto, multicastLoop)
+	if err != nil || r == nil {
+		return r, err
+	}
+
+	// Phaethon patch #10: in-stack loopback for locally-generated packets.
+	// Applied here as a single choke point rather than threaded through every
+	// makeRoute call site, because findRouteInner returns from many branches
+	// (IPIP, EgressNIC, route table, local route, fallback).
+	//
+	// The lock is not held here: findRouteInner released it on return, so
+	// RouteSelectorLocalLoopback can take it without nesting RLock.
+	if s.RouteSelectorLocalLoopback(remoteAddr) {
+		r.setLocalLoopback()
+	}
+	return r, nil
+}
+
+// findRouteInner is FindRoute without the Phaethon patch #10 loopback
+// override.
+func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

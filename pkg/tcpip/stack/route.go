@@ -115,6 +115,22 @@ func (r *Route) Loop() PacketLooping {
 	return r.routeInfo.Loop
 }
 
+// setLocalLoopback forces the route to loop the packet back into the stack
+// instead of writing it to the egress NIC (Phaethon patch #10).
+//
+// Clearing PacketOut makes writePacketPostRouting return right after
+// handleLocalPacket, which also skips the postrouting iptables hook — a
+// looped-back packet must not be NAT'd. It likewise makes local() report true,
+// so transport checksums are not required and no link-address resolution is
+// attempted; both match what makeLocalRoute produces for stack-owned
+// addresses.
+//
+// Must be called before the Route is shared with any other goroutine, i.e.
+// from FindRoute immediately after construction.
+func (r *Route) setLocalLoopback() {
+	r.routeInfo.Loop = PacketLoop
+}
+
 // OutgoingNIC returns the route's outgoing NIC.
 func (r *Route) OutgoingNIC() tcpip.NICID {
 	return r.outgoingNIC.id
