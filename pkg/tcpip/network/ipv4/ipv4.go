@@ -592,8 +592,16 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, r, e, inNicName, outNicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
+		// Phaethon diagnostic: log iptables postrouting drop
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] CheckPostrouting DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
+			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), inNicName, outNicName)
 		return nil
 	}
+	// Phaethon diagnostic: trace after CheckPostrouting pass
+	hdr := header.IPv4(pkt.NetworkHeader().Slice())
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] writePacketPostRouting post-CheckPostrouting: src=%s dst=%s proto=%d\n",
+		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol())
 
 	stats := e.stats.ip
 
@@ -624,8 +632,16 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 	if err := e.nic.WritePacket(r, pkt); err != nil {
 		stats.OutgoingPacketErrors.Increment()
+		// Phaethon diagnostic: log WritePacket error
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] WritePacket ERROR: src=%s dst=%s proto=%d nicID=%d err=%v\n",
+			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), e.nic.ID(), err)
 		return err
 	}
+	// Phaethon diagnostic: trace successful WritePacket
+	hdr2 := header.IPv4(pkt.NetworkHeader().Slice())
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] WritePacket OK: src=%s dst=%s proto=%d nicID=%d\n",
+		hdr2.SourceAddress(), hdr2.DestinationAddress(), hdr2.Protocol(), e.nic.ID())
 	stats.PacketsSent.Increment()
 	return nil
 }
@@ -702,8 +718,16 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt *stack.PacketB
 	if ok := stk.IPTables().CheckForward(pkt, inNicName, outNicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.stats.ip.IPTablesForwardDropped.Increment()
+		// Phaethon diagnostic: log iptables forward drop
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] CheckForward DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
+			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), inNicName, outNicName)
 		return nil
 	}
+	// Phaethon diagnostic: trace after CheckForward pass
+	hdr := header.IPv4(pkt.NetworkHeader().Slice())
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] forwardPacketWithRoute post-CheckForward: src=%s dst=%s proto=%d\n",
+		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol())
 
 	// We need to do a deep copy of the IP packet because
 	// WriteHeaderIncludedPacket may modify the packet buffer, but we do
@@ -836,6 +860,11 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 		return &ip.ErrOther{Err: err}
 	}
 	defer r.Release()
+
+	// Phaethon diagnostic: trace after FindRoute
+	h2 := header.IPv4(pkt.NetworkHeader().Slice())
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] forwardUnicastPacket post-FindRoute: src=%s dst=%s proto=%d ttl=%d nicID=%d needIPIP=%v\n",
+		h2.SourceAddress(), h2.DestinationAddress(), h2.Protocol(), h2.TTL(), r.NICID(), r.NeedIPIP)
 
 	// Phaethon: IPIP encapsulation for tunnel routing.
 	// If the route requires IPIP encapsulation, wrap the packet and re-route.
@@ -1267,14 +1296,31 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	// reach the local transport demuxer, while conntrack-marked return packets
 	// always forward through OutputNICName after reverse NAT restores the client
 	// destination. This bypasses destination policy for per-flow return routing.
-	if e.Forwarding() && (pkt.OutputNICName != "" || !e.protocol.stack.RouteSelectorLocalStack(dstAddr)) {
+	localStack := e.protocol.stack.RouteSelectorLocalStack(dstAddr)
+	// Phaethon diagnostic: trace the forward-vs-local decision
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] handleValidatedPacket: src=%s dst=%s proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
+		srcAddr, dstAddr, h.Protocol(), e.nic.ID(), inNICName, e.Forwarding(), pkt.OutputNICName, localStack)
+	if e.Forwarding() && (pkt.OutputNICName != "" || !localStack) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
 		pkt.NetworkPacketInfo.LocalAddressBroadcast = subnet.IsBroadcast(dstAddr) || dstAddr == header.IPv4Broadcast
+		// Phaethon diagnostic: trace local delivery
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] handleValidatedPacket LOCAL_DELIVERY: dst=%s proto=%d nicName=%s\n",
+			dstAddr, h.Protocol(), inNICName)
+		e.deliverPacketLocally(h, pkt, inNICName)
+	} else if localStack {
+		// Phaethon patch #14: LocalStack=true but no addressEndpoint (Link NIC in
+		// promiscuous mode). Deliver locally anyway — the RouteSelector determined
+		// this is a local stack destination, and the TCP/UDP forwarder will handle it.
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] handleValidatedPacket LOCAL_DELIVERY (LinkNIC): dst=%s proto=%d nicName=%s\n",
+			dstAddr, h.Protocol(), inNICName)
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else {
 		stats.ip.InvalidDestinationAddressesReceived.Increment()
+		// Phaethon diagnostic: trace silent drop
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] handleValidatedPacket DROP: dst=%s proto=%d nicName=%s localStack=%v forwarding=%v\n",
+			dstAddr, h.Protocol(), inNICName, localStack, e.Forwarding())
 	}
 }
 

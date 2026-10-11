@@ -1693,14 +1693,26 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 			if decision.EgressNIC != 0 && !decision.NeedIPIP {
 				outgoingNIC, ok := s.nics[decision.EgressNIC]
 				if ok && outgoingNIC.Enabled() {
-					if addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
+					addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+					// Phaethon LinkNIC fix: LinkNICs have no bound addresses but accept
+					// forwarded packets with any source IP (promiscuous + spoofing mode).
+					// When getAddressEP returns nil but the packet already has a source
+					// address (forwarded traffic), create a route using the outgoingNIC
+					// as both outgoing and local address NIC.
+					if addressEndpoint == nil && localAddr.BitLen() > 0 {
+						addressEndpoint = nil // Will be handled by makeRoute with existing localAddr
+					}
+					// Phaethon patch #13: LinkNICs in promiscuous mode accept forwarded
+					// packets with no localAddr (FindRoute called with empty localAddr for
+					// forwarded traffic). makeRoute handles nil addressEndpoint safely.
+					if addressEndpoint != nil || localAddr.BitLen() > 0 || outgoingNIC.Promiscuous() {
 						return makeRoute(
 							netProto,
 							tcpip.Address{}, /* gateway */
 							localAddr,
 							remoteAddr,
 							outgoingNIC,
-							outgoingNIC,
+							outgoingNIC, // localAddressNIC = outgoingNIC for LinkNICs
 							addressEndpoint,
 							s.handleLocal,
 							multicastLoop,

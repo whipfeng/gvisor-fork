@@ -211,7 +211,9 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 	}
 
 	if localAddr.BitLen() == 0 {
-		localAddr = localAddressEndpoint.AddressWithPrefix().Address
+		if localAddressEndpoint != nil {
+			localAddr = localAddressEndpoint.AddressWithPrefix().Address
+		}
 	}
 
 	loop := PacketOut
@@ -226,8 +228,10 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 			loop |= PacketLoop
 		} else if remoteAddr == header.IPv4Broadcast {
 			loop |= PacketLoop
-		} else if subnet := localAddressEndpoint.AddressWithPrefix().Subnet(); subnet.IsBroadcast(remoteAddr) {
-			loop |= PacketLoop
+		} else if localAddressEndpoint != nil {
+			if subnet := localAddressEndpoint.AddressWithPrefix().Subnet(); subnet.IsBroadcast(remoteAddr) {
+				loop |= PacketLoop
+			}
 		}
 	}
 
@@ -262,9 +266,11 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, gateway, localAddr, remoteA
 		return r
 	}
 
-	if subnet := localAddressEndpoint.Subnet(); subnet.IsBroadcast(remoteAddr) {
-		r.ResolveWith(header.EthernetBroadcastAddress)
-		return r
+	if localAddressEndpoint != nil {
+		if subnet := localAddressEndpoint.Subnet(); subnet.IsBroadcast(remoteAddr) {
+			r.ResolveWith(header.EthernetBroadcastAddress)
+			return r
+		}
 	}
 
 	if r.RemoteAddress() == r.LocalAddress() {

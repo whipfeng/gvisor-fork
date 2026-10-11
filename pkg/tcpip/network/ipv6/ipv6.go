@@ -1403,6 +1403,11 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		e.deliverPacketLocally(h, pkt, inNICName)
+	} else if e.protocol.stack.RouteSelectorLocalStack(dstAddr) {
+		// Phaethon patch #14: LocalStack=true but no addressEndpoint (Link NIC in
+		// promiscuous mode). Deliver locally anyway — the RouteSelector determined
+		// this is a local stack destination, and the TCP/UDP forwarder will handle it.
+		e.deliverPacketLocally(h, pkt, inNICName)
 	} else {
 		stats.InvalidDestinationAddressesReceived.Increment()
 	}
