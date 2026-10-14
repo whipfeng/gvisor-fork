@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/hash/jenkins"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
+	"phaethon/util"
 )
 
 // +stateify savable
@@ -632,42 +633,32 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 	localAddrSlice := id.LocalAddress.AsSlice()
 	is172_30 := len(localAddrSlice) == 4 && localAddrSlice[0] == 172 && localAddrSlice[1] == 30
 	if protocol == header.TCPProtocolNumber && (id.LocalPort == 22 || is172_30) {
-		Logf("gvisor", "[GVISOR-TRACE] deliverPacket: TCP lookup id=%+v foundEP=%v\n", id, ep != nil)
+		util.LogModuleDebug("gvisor", "[GVISOR-TRACE] deliverPacket: TCP lookup id=%+v foundEP=%v", id, ep != nil)
 	}
 
 	// Debug: log for UDP port 53
 	if protocol == header.UDPProtocolNumber && id.LocalPort == 53 {
-		logPath := filepath.Join(os.TempDir(), "phaethon-deliver-debug.log")
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			fmt.Fprintf(f, "[DELIVER-DEBUG] id=%+v foundEP=%v\n", id, ep != nil)
-			f.Close()
-		}
+		util.LogModuleDebug("gvisor", "[DELIVER-DEBUG] id=%+v foundEP=%v", id, ep != nil)
 	}
 
 	// Debug: log all registered endpoint IDs for port 53
 	if protocol == header.UDPProtocolNumber && id.LocalPort == 53 {
-		logPath := filepath.Join(os.TempDir(), "phaethon-registered-eps-debug.log")
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			eps.mu.RLock()
-			fmt.Fprintf(f, "[REGISTERED-EPS-DEBUG] total endpoints for UDP: %d\n", len(eps.endpoints))
-			for epid := range eps.endpoints {
-				fmt.Fprintf(f, "[REGISTERED-EPS-DEBUG]   epid=%+v\n", epid)
-			}
-			eps.mu.RUnlock()
-			f.Close()
+		util.LogModuleDebug("gvisor", "[REGISTERED-EPS-DEBUG] total endpoints for UDP: %d", len(eps.endpoints))
+		eps.mu.RLock()
+		for epid := range eps.endpoints {
+			util.LogModuleDebug("gvisor", "[REGISTERED-EPS-DEBUG]   epid=%+v", epid)
 		}
+		eps.mu.RUnlock()
 	}
 
 	if ep == nil {
 		if protocol == header.UDPProtocolNumber {
 			d.stack.stats.UDP.UnknownPortErrors.Increment()
 		}
-		Logf("gvisor", "[GVISOR-TRACE] deliverPacket: no endpoint found for id=%+v proto=%d\n", id, protocol)
+		util.LogModuleDebug("gvisor", "[GVISOR-TRACE] deliverPacket: no endpoint found for id=%+v proto=%d", id, protocol)
 		return false
 	}
-	Logf("gvisor", "[GVISOR-TRACE] deliverPacket: found endpoint for id=%+v proto=%d, calling handlePacket\n", id, protocol)
+	util.LogModuleDebug("gvisor", "[GVISOR-TRACE] deliverPacket: found endpoint for id=%+v proto=%d, calling handlePacket", id, protocol)
 	return ep.handlePacket(id, pkt)
 }
 

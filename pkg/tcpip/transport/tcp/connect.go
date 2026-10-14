@@ -19,7 +19,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"os"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/sync"
@@ -29,6 +28,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"phaethon/util"
 )
 
 const (
@@ -591,7 +591,7 @@ func (h *handshake) start() {
 	h.sendSYNOpts = synOpts
 	// Phaethon diagnostic: trace SYN-ACK sending
 	corrID := fmt.Sprintf("%s:%d->%s:%d", h.ep.TransportEndpointInfo.ID.RemoteAddress, h.ep.TransportEndpointInfo.ID.RemotePort, h.ep.TransportEndpointInfo.ID.LocalAddress, h.ep.TransportEndpointInfo.ID.LocalPort)
-	fmt.Fprintf(os.Stderr, "[TCP-HANDSHAKE] [%s] sending SYN-ACK via route nicID=%d flags=%v seq=%d ack=%d\n",
+	util.LogModuleDebug("gvisor", "[TCP-HANDSHAKE] [%s] sending SYN-ACK via route nicID=%d flags=%v seq=%d ack=%d",
 		corrID, h.ep.route.NICID(), h.flags, h.iss, h.ackNum)
 	h.ep.sendSynTCP(h.ep.route, tcpFields{
 		id:        h.ep.TransportEndpointInfo.ID,

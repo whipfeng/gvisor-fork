@@ -38,6 +38,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/ports"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"phaethon/util"
 )
 
 const (
@@ -49,7 +50,7 @@ const (
 type LogFunc func(module string, format string, args ...interface{})
 
 var logFunc LogFunc = func(module string, format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "["+module+"] "+format+"\n", args...)
+	util.LogModuleDebug(module, format, args...)
 }
 
 // SetLogFunc injects a custom logging function for gVisor diagnostic logs.
@@ -1697,7 +1698,7 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 		decision, ok := s.decisionForSelectorRLocked(remoteAddr)
 		if ok {
 			// Phaethon diagnostic: trace RouteSelector decision
-			fmt.Fprintf(os.Stderr, "[ROUTE-SELECTOR] FindRoute localAddr=%s remoteAddr=%s inputNIC=%d -> decision: EgressNIC=%d NeedIPIP=%v LocalStack=%v\n",
+			util.LogModuleDebug("gvisor", "[ROUTE-SELECTOR] FindRoute localAddr=%s remoteAddr=%s inputNIC=%d -> decision: EgressNIC=%d NeedIPIP=%v LocalStack=%v\n",
 				localAddr, remoteAddr, id, decision.EgressNIC, decision.NeedIPIP, decision.LocalStack)
 			// LocalStack: FindRoute applies its loopback behavior after this
 			// function constructs a route; receive-path delivery is resolved by

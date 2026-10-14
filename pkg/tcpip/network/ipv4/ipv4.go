@@ -37,6 +37,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/internal/ip"
 	"gvisor.dev/gvisor/pkg/tcpip/network/internal/multicast"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"phaethon/util"
 )
 
 const (
@@ -602,13 +603,13 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
 		// Phaethon diagnostic: log iptables postrouting drop
 		hdr := header.IPv4(pkt.NetworkHeader().Slice())
-		stack.Logf("gvisor", "CheckPostrouting DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
+		util.LogModuleDebug("gvisor", "CheckPostrouting DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
 			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), inNicName, outNicName)
 		return nil
 	}
 	// Phaethon diagnostic: trace after CheckPostrouting pass
 	hdr := header.IPv4(pkt.NetworkHeader().Slice())
-	stack.Logf("gvisor", "writePacketPostRouting post-CheckPostrouting: src=%s dst=%s proto=%d\n",
+	util.LogModuleDebug("gvisor", "writePacketPostRouting post-CheckPostrouting: src=%s dst=%s proto=%d\n",
 		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol())
 
 	stats := e.stats.ip
@@ -640,18 +641,18 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 	// Phaethon diagnostic: log NIC type before WritePacket (reuse hdr from line 604)
 	nicName := e.protocol.stack.FindNICNameFromID(e.nic.ID())
-	stack.Logf("gvisor", "WritePacket CALL: src=%s dst=%s proto=%d nicID=%d nicName=%s nicType=%T\n",
+	util.LogModuleDebug("gvisor", "WritePacket CALL: src=%s dst=%s proto=%d nicID=%d nicName=%s nicType=%T\n",
 		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), e.nic.ID(), nicName, e.nic)
 
 	if err := e.nic.WritePacket(r, pkt); err != nil {
 		stats.OutgoingPacketErrors.Increment()
 		// Phaethon diagnostic: log WritePacket error
-		stack.Logf("gvisor", "WritePacket ERROR: src=%s dst=%s proto=%d nicID=%d err=%v\n",
+		util.LogModuleDebug("gvisor", "WritePacket ERROR: src=%s dst=%s proto=%d nicID=%d err=%v\n",
 			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), e.nic.ID(), err)
 		return err
 	}
 	// Phaethon diagnostic: trace successful WritePacket (reuse hdr)
-	stack.Logf("gvisor", "WritePacket OK: src=%s dst=%s proto=%d nicID=%d\n",
+	util.LogModuleDebug("gvisor", "WritePacket OK: src=%s dst=%s proto=%d nicID=%d\n",
 		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), e.nic.ID())
 	stats.PacketsSent.Increment()
 	return nil
@@ -731,13 +732,13 @@ func (e *endpoint) forwardPacketWithRoute(route *stack.Route, pkt *stack.PacketB
 		e.stats.ip.IPTablesForwardDropped.Increment()
 		// Phaethon diagnostic: log iptables forward drop
 		hdr := header.IPv4(pkt.NetworkHeader().Slice())
-		stack.Logf("gvisor", "CheckForward DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
+		util.LogModuleDebug("gvisor", "CheckForward DROP: src=%s dst=%s proto=%d inNIC=%s outNIC=%s\n",
 			hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol(), inNicName, outNicName)
 		return nil
 	}
 	// Phaethon diagnostic: trace after CheckForward pass
 	hdr := header.IPv4(pkt.NetworkHeader().Slice())
-	stack.Logf("gvisor", "forwardPacketWithRoute post-CheckForward: src=%s dst=%s proto=%d\n",
+	util.LogModuleDebug("gvisor", "forwardPacketWithRoute post-CheckForward: src=%s dst=%s proto=%d\n",
 		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol())
 
 	// We need to do a deep copy of the IP packet because
@@ -906,7 +907,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 
 	// Phaethon diagnostic: trace after FindRoute
 	h2 := header.IPv4(pkt.NetworkHeader().Slice())
-	stack.Logf("gvisor", "forwardUnicastPacket post-FindRoute: src=%s dst=%s proto=%d ttl=%d nicID=%d needIPIP=%v\n",
+	util.LogModuleDebug("gvisor", "forwardUnicastPacket post-FindRoute: src=%s dst=%s proto=%d ttl=%d nicID=%d needIPIP=%v\n",
 		h2.SourceAddress(), h2.DestinationAddress(), h2.Protocol(), h2.TTL(), r.NICID(), r.NeedIPIP)
 
 	// Phaethon: IPIP encapsulation for tunnel routing.
@@ -1425,7 +1426,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	srcIP := net.IP(srcAddr.AsSlice())
 	dstIP := net.IP(dstAddr.AsSlice())
 	corrID := phaethonCorrID(srcIP, dstIP, 0, 0)
-	stack.Logf("gvisor", "[%s] handleValidatedPacket proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
+	util.LogModuleDebug("gvisor", "[%s] handleValidatedPacket proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
 		corrID, h.Protocol(), e.nic.ID(), inNICName, e.Forwarding(), pkt.OutputNICName, localStack)
 	// Phaethon fix: set InputNICName before forwarding so that CheckPostrouting
 	// can match InputInterface conditions (e.g., SNAT rules matching "tun").
@@ -1440,20 +1441,20 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
 		pkt.NetworkPacketInfo.LocalAddressBroadcast = subnet.IsBroadcast(dstAddr) || dstAddr == header.IPv4Broadcast
 		// Phaethon diagnostic: trace local delivery
-		stack.Logf("gvisor", "[%s] LOCAL_DELIVERY proto=%d nicName=%s\n",
+		util.LogModuleDebug("gvisor", "[%s] LOCAL_DELIVERY proto=%d nicName=%s\n",
 			corrID, h.Protocol(), inNICName)
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else if localStack {
 		// Phaethon patch #14: LocalStack=true but no addressEndpoint (Link NIC in
 		// promiscuous mode). Deliver locally anyway — the RouteSelector determined
 		// this is a local stack destination, and the TCP/UDP forwarder will handle it.
-		stack.Logf("gvisor", "[%s] LOCAL_DELIVERY_LinkNIC proto=%d nicName=%s\n",
+		util.LogModuleDebug("gvisor", "[%s] LOCAL_DELIVERY_LinkNIC proto=%d nicName=%s\n",
 			corrID, h.Protocol(), inNICName)
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else {
 		stats.ip.InvalidDestinationAddressesReceived.Increment()
 		// Phaethon diagnostic: trace silent drop
-		stack.Logf("gvisor", "[%s] DROP localStack=%v forwarding=%v\n",
+		util.LogModuleDebug("gvisor", "[%s] DROP localStack=%v forwarding=%v\n",
 			corrID, localStack, e.Forwarding())
 	}
 }
@@ -1540,7 +1541,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	} else {
 		corrID = phaethonCorrID(srcIP, dstIP, 0, 0)
 	}
-	stack.Logf("gvisor", "[%s] deliverPacketLocally ENTRY inNIC=%s proto=%d\n",
+	util.LogModuleDebug("gvisor", "[%s] deliverPacketLocally ENTRY inNIC=%s proto=%d\n",
 		corrID, inNICName, h.Protocol())
 	stats := e.stats
 	// One-time debug log for CheckInput
@@ -1567,7 +1568,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	}
 	inputOK := e.protocol.stack.IPTables().CheckInput(pkt, inNICName)
 	// Phaethon diagnostic: log CheckInput result for all packets
-	stack.Logf("gvisor", "[%s] CheckInput ok=%v\n", corrID, inputOK)
+	util.LogModuleDebug("gvisor", "[%s] CheckInput ok=%v\n", corrID, inputOK)
 	if !inputOK {
 		// iptables is telling us to drop the packet.
 		stats.ip.IPTablesInputDropped.Increment()
@@ -1576,7 +1577,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 
 	// Phaethon diagnostic: check if packet is a fragment
 	isFragment := h.More() || h.FragmentOffset() != 0
-	stack.Logf("gvisor", "[%s] CheckInput OK more=%v fragOff=%d isFragment=%v\n",
+	util.LogModuleDebug("gvisor", "[%s] CheckInput OK more=%v fragOff=%d isFragment=%v\n",
 		corrID, h.More(), h.FragmentOffset(), isFragment)
 
 	if h.More() || h.FragmentOffset() != 0 {
@@ -1639,7 +1640,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 		}
 		if !ready {
 			// Phaethon diagnostic: fragment not ready
-			stack.Logf("gvisor", "[%s] Fragment NOT READY id=%d fragOff=%d more=%v\n",
+			util.LogModuleDebug("gvisor", "[%s] Fragment NOT READY id=%d fragOff=%d more=%v\n",
 				corrID, h.ID(), h.FragmentOffset(), h.More())
 			return
 		}
@@ -1708,7 +1709,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	} else {
 		corrID2 = phaethonCorrID(srcIP2, dstIP2, 0, 0)
 	}
-	stack.Logf("gvisor", "[%s] DeliverTransportPacket CALL proto=%d nicName=%s\n",
+	util.LogModuleDebug("gvisor", "[%s] DeliverTransportPacket CALL proto=%d nicName=%s\n",
 		corrID2, p, inNICName)
 
 	switch res := e.dispatcher.DeliverTransportPacket(p, pkt); res {
