@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"os"
 	"sync"
 	"time"
 
