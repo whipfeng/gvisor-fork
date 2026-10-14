@@ -16,6 +16,7 @@ package tcp
 
 import (
 	"fmt"
+	"os"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -74,8 +75,13 @@ func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Packet
 	}
 	defer s.DecRef()
 
+	// Phaethon diagnostic: trace why handler might not be called
+	corrID := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
+
 	// We only care about well-formed SYN packets (not SYN-ACK) packets.
 	if !s.csumValid || !s.flags.Contains(header.TCPFlagSyn) || s.flags.Contains(header.TCPFlagAck) {
+		// Phaethon: log non-SYN packets for debugging
+		fmt.Fprintf(os.Stderr, "[TCP-FWD] [%s] not a SYN packet, flags=%v csumValid=%v\n", corrID, s.flags, s.csumValid)
 		return false
 	}
 
@@ -86,14 +92,21 @@ func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Packet
 
 	// We have an inflight request for this id, ignore this one for now.
 	if _, ok := f.inFlight[id]; ok {
+		// Phaethon diagnostic: log when handler is skipped due to in-flight
+		fmt.Fprintf(os.Stderr, "[TCP-FWD] [%s] SYN skipped: already in-flight (inFlightCount=%d)\n", corrID, len(f.inFlight))
 		return true
 	}
 
 	// Ignore the segment if we're beyond the limit.
 	if len(f.inFlight) >= f.maxInFlight {
 		f.stack.Stats().TCP.ForwardMaxInFlightDrop.Increment()
+		// Phaethon diagnostic: log when dropped due to max in-flight
+		fmt.Fprintf(os.Stderr, "[TCP-FWD] [%s] SYN dropped: max in-flight reached (%d/%d)\n", corrID, len(f.inFlight), f.maxInFlight)
 		return true
 	}
+
+	// Phaethon diagnostic: log when handler is about to be called
+	fmt.Fprintf(os.Stderr, "[TCP-FWD] [%s] SYN received, calling handler (inFlightCount=%d)\n", corrID, len(f.inFlight))
 
 	// Launch a new goroutine to handle the request.
 	f.inFlight[id] = struct{}{}

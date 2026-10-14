@@ -628,6 +628,13 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 	ep := eps.findEndpointLocked(id)
 	eps.mu.RUnlock()
 
+	// Phaethon diagnostic: log endpoint lookup result for TCP port 22 or 172.30.x.x
+	localAddrSlice := id.LocalAddress.AsSlice()
+	is172_30 := len(localAddrSlice) == 4 && localAddrSlice[0] == 172 && localAddrSlice[1] == 30
+	if protocol == header.TCPProtocolNumber && (id.LocalPort == 22 || is172_30) {
+		Logf("gvisor", "[GVISOR-TRACE] deliverPacket: TCP lookup id=%+v foundEP=%v\n", id, ep != nil)
+	}
+
 	// Debug: log for UDP port 53
 	if protocol == header.UDPProtocolNumber && id.LocalPort == 53 {
 		logPath := filepath.Join(os.TempDir(), "phaethon-deliver-debug.log")
@@ -657,8 +664,10 @@ func (d *transportDemuxer) deliverPacket(protocol tcpip.TransportProtocolNumber,
 		if protocol == header.UDPProtocolNumber {
 			d.stack.stats.UDP.UnknownPortErrors.Increment()
 		}
+		Logf("gvisor", "[GVISOR-TRACE] deliverPacket: no endpoint found for id=%+v proto=%d\n", id, protocol)
 		return false
 	}
+	Logf("gvisor", "[GVISOR-TRACE] deliverPacket: found endpoint for id=%+v proto=%d, calling handlePacket\n", id, protocol)
 	return ep.handlePacket(id, pkt)
 }
 

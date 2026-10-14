@@ -16,6 +16,7 @@ package stack
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 
@@ -159,9 +160,27 @@ func (*delegatingQueueingDiscipline) Close() {}
 
 // WritePacket passes the packet through to the underlying LinkWriter's WritePackets.
 func (qDisc *delegatingQueueingDiscipline) WritePacket(pkt *PacketBuffer) tcpip.Error {
+	// Phaethon diagnostic: log qDisc WritePacket entry for IPv4
+	isIPIP := false
+	if pkt.NetworkProtocolNumber == 2048 { // IPv4
+		hdr := header.IPv4(pkt.NetworkHeader().Slice())
+		isIPIP = hdr.Protocol() == 4
+		if isIPIP {
+			fmt.Fprintf(os.Stderr, "[QDISC] WritePacket: src=%s dst=%s proto=4 linkWriterType=%T linkWriterPtr=%p\n",
+				hdr.SourceAddress(), hdr.DestinationAddress(), qDisc.LinkWriter, qDisc.LinkWriter)
+		}
+	}
 	var pkts PacketBufferList
 	pkts.PushBack(pkt)
-	_, err := qDisc.LinkWriter.WritePackets(pkts)
+	if isIPIP {
+		fmt.Fprintf(os.Stderr, "[QDISC] Calling WritePackets with %d packets\n", pkts.Len())
+	}
+	n, err := qDisc.LinkWriter.WritePackets(pkts)
+	// Phaethon diagnostic: log WritePackets result for IPIP
+	if isIPIP {
+		fmt.Fprintf(os.Stderr, "[QDISC] WritePackets returned: n=%d err=%v linkWriterType=%T linkWriterPtr=%p\n",
+			n, err, qDisc.LinkWriter, qDisc.LinkWriter)
+	}
 	return err
 }
 
@@ -369,11 +388,17 @@ func (n *nic) IsLoopback() bool {
 // WritePacket implements NetworkEndpoint.
 func (n *nic) WritePacket(r *Route, pkt *PacketBuffer) tcpip.Error {
 	routeInfo, _, err := r.resolvedFields(nil)
+	// Phaethon diagnostic: log route resolution result for all packets
+	fmt.Fprintf(os.Stderr, "[STACK-NIC] WritePacket ENTRY: netProto=%d nicID=%d routeErr=%v\n",
+		pkt.NetworkProtocolNumber, n.id, err)
 	switch err.(type) {
 	case nil:
 		pkt.EgressRoute = routeInfo
 		return n.writePacket(pkt)
 	case *tcpip.ErrWouldBlock:
+		// Phaethon diagnostic: log packet being queued for link resolution
+		fmt.Fprintf(os.Stderr, "[STACK-NIC] WritePacket QUEUED for link resolution: netProto=%d nicID=%d\n",
+			pkt.NetworkProtocolNumber, n.id)
 		// As per relevant RFCs, we should queue packets while we wait for link
 		// resolution to complete.
 		//
@@ -845,9 +870,14 @@ func (n *nic) DeliverLinkPacket(protocol tcpip.NetworkProtocolNumber, pkt *Packe
 // DeliverTransportPacket delivers the packets to the appropriate transport
 // protocol endpoint.
 func (n *nic) DeliverTransportPacket(protocol tcpip.TransportProtocolNumber, pkt *PacketBuffer) TransportPacketDisposition {
+	// Phaethon diagnostic: trace transport delivery
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] DeliverTransportPacket ENTRY: nic=%d proto=%d netProto=%d\n",
+		n.ID(), protocol, pkt.NetworkProtocolNumber)
+
 	state, ok := n.stack.transportProtocols[protocol]
 	if !ok {
 		n.stats.unknownL4ProtocolRcvdPacketCounts.Increment(uint64(protocol))
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] DeliverTransportPacket: unknown L4 proto=%d\n", protocol)
 		return TransportPacketProtocolUnreachable
 	}
 
@@ -855,14 +885,18 @@ func (n *nic) DeliverTransportPacket(protocol tcpip.TransportProtocolNumber, pkt
 
 	if len(pkt.TransportHeader().Slice()) == 0 {
 		n.stats.malformedL4RcvdPackets.Increment()
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] DeliverTransportPacket: empty transport header\n")
 		return TransportPacketHandled
 	}
 
 	srcPort, dstPort, err := transProto.ParsePorts(pkt.TransportHeader().Slice())
 	if err != nil {
 		n.stats.malformedL4RcvdPackets.Increment()
+		fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] DeliverTransportPacket: parse ports error: %v\n", err)
 		return TransportPacketHandled
 	}
+
+	fmt.Fprintf(os.Stderr, "[GVISOR-TRACE] DeliverTransportPacket: srcPort=%d dstPort=%d\n", srcPort, dstPort)
 
 	netProto, ok := n.stack.networkProtocols[pkt.NetworkProtocolNumber]
 	if !ok {
@@ -876,15 +910,33 @@ func (n *nic) DeliverTransportPacket(protocol tcpip.TransportProtocolNumber, pkt
 		RemotePort:    srcPort,
 		RemoteAddress: src,
 	}
+
+	// Phaethon diagnostic: log for 172.30.x.x or port 22
+	dstSlice := dst.AsSlice()
+	is172_30 := len(dstSlice) == 4 && dstSlice[0] == 172 && dstSlice[1] == 30
+	if is172_30 || dstPort == 22 {
+		Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: calling demux.deliverPacket id=%+v\n", id)
+	}
 	if n.stack.demux.deliverPacket(protocol, pkt, id) {
+		if is172_30 || dstPort == 22 {
+			Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: demux.deliverPacket returned true id=%+v\n", id)
+		}
 		return TransportPacketHandled
+	}
+	if is172_30 || dstPort == 22 {
+		Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: demux.deliverPacket returned false id=%+v\n", id)
 	}
 
 	// Try to deliver to per-stack default handler.
 	if state.defaultHandler != nil {
+		Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: trying defaultHandler for id=%+v\n", id)
 		if state.defaultHandler(id, pkt) {
+			Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: defaultHandler returned true\n")
 			return TransportPacketHandled
 		}
+		Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: defaultHandler returned false\n")
+	} else {
+		Logf("gvisor", "[GVISOR-TRACE] DeliverTransportPacket: no defaultHandler registered for proto=%d\n", protocol)
 	}
 
 	// We could not find an appropriate destination for this packet so

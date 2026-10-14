@@ -319,6 +319,26 @@ type TransportProtocol interface {
 	Parse(pkt *PacketBuffer) (ok bool)
 }
 
+// TunnelProtocol is the interface that network-layer tunnel protocols (like IPIP,
+// GRE, VXLAN) must implement. Unlike TransportProtocol which creates socket endpoints,
+// TunnelProtocol decapsulates tunnel packets and returns the inner packet for normal
+// network layer processing.
+type TunnelProtocol interface {
+	// Number returns the IP protocol number for this tunnel protocol
+	// (e.g., 4 for IPIP, 47 for GRE).
+	Number() tcpip.TransportProtocolNumber
+
+	// ShouldDecapsulate checks if this packet should be decapsulated by this handler.
+	// For example, IPIP checks if outer destination matches local EIP.
+	// Returns true if the packet should be decapsulated, false otherwise.
+	ShouldDecapsulate(pkt *PacketBuffer) bool
+
+	// Decapsulate decapsulates the tunnel packet and returns the inner packet.
+	// The caller is responsible for releasing the returned packet buffer.
+	// Returns nil if decapsulation fails.
+	Decapsulate(pkt *PacketBuffer) *PacketBuffer
+}
+
 // TransportPacketDisposition is the result from attempting to deliver a packet
 // to the transport layer.
 type TransportPacketDisposition int

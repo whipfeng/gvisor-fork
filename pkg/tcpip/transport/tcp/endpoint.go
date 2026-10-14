@@ -419,6 +419,12 @@ type Endpoint struct {
 	isRegistered      bool
 	boundNICID        tcpip.NICID
 	route             *stack.Route `state:"nosave"`
+	// RouteFunc is an optional per-endpoint route callback (Phaethon patch #13).
+	// When set, connect() calls it instead of stack.FindRoute(). The returned
+	// RouteDecision is used to build the route via stack.BuildRouteFromDecision.
+	// This allows v2 proxy connections to bypass the stack-level RouteSelector
+	// and use proxy-specific routing (direct IPIP to peer's LinkNIC).
+	RouteFunc func() stack.RouteDecision `state:"nosave"`
 	ipv4TTL           uint8
 	ipv6HopLimit      int16
 	isConnectNotified bool
@@ -2439,9 +2445,21 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 	}
 
 	// Find a route to the desired destination.
-	r, err := e.stack.FindRoute(nicID, e.TransportEndpointInfo.ID.LocalAddress, addr.Addr, netProto, false /* multicastLoop */)
-	if err != nil {
-		return err
+	// Phaethon patch #13: per-endpoint RouteFunc bypasses stack-level RouteSelector.
+	var r *stack.Route
+	if e.RouteFunc != nil {
+		decision := e.RouteFunc()
+		var err tcpip.Error
+		r, err = e.stack.BuildRouteFromDecision(decision, netProto)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err tcpip.Error
+		r, err = e.stack.FindRoute(nicID, e.TransportEndpointInfo.ID.LocalAddress, addr.Addr, netProto, false /* multicastLoop */)
+		if err != nil {
+			return err
+		}
 	}
 	defer r.Release()
 
