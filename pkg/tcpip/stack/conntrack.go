@@ -822,7 +822,11 @@ func (cn *conn) performNAT(pkt *PacketBuffer, hook Hook, r *Route, portsOrIdents
 	*manip = manipPerformed
 	
 	// Record the input NIC for SNAT so DNAT reply packets can be routed correctly.
-	if !dnat && pkt.InputNICName != "" {
+	// Only for real SNAT (changeAddress): the no-op port-remap SNAT from
+	// maybePerformNoopNAT (conntrack.go:769, empty address) also reaches here and
+	// would otherwise pin every untouched forwarded flow's replies to an
+	// address-less LinkNIC, dropping them (patch #6 OutputNICName forcing).
+	if !dnat && changeAddress && pkt.InputNICName != "" {
 		cn.originalInputNIC = pkt.InputNICName
 	}
 	
