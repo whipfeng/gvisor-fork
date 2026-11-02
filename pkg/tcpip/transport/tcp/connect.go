@@ -834,6 +834,11 @@ func (e *Endpoint) sendSynTCP(r *stack.Route, tf tcpFields, opts header.TCPSynOp
 	defer p.DecRef()
 	if err := e.sendTCP(r, tf, p, stack.GSO{}); err != nil {
 		e.stats.SendErrors.SynSendToNetworkFailed.Increment()
+		// Phaethon: SYN send failures were previously silent, which hid
+		// invalid-route bugs (e.g. empty local address endpoint). Log loudly;
+		// retry semantics are unchanged.
+		util.LogModuleError("gvisor", "[TCP-SYN-SEND] failed: remote=%s:%d local=%s:%d err=%v",
+			r.RemoteAddress(), tf.id.RemotePort, r.LocalAddress(), tf.id.LocalPort, err)
 	}
 	putOptions(tf.opts)
 	return nil

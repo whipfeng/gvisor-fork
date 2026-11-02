@@ -612,6 +612,13 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 	util.LogModuleDebug("gvisor", "writePacketPostRouting post-CheckPostrouting: src=%s dst=%s proto=%d\n",
 		hdr.SourceAddress(), hdr.DestinationAddress(), hdr.Protocol())
 
+	// Phaethon: IPIP encapsulation for endpoint-originated packets (RouteFunc
+	// designated-link sockets). Postrouting (SNAT) was already applied above,
+	// mirroring the forwarding path in forwardWithIPIPEncapsulation.
+	if r.NeedIPIP && r.EgressEIP != (tcpip.Address{}) {
+		return e.writeWithIPIPEncapsulation(r, pkt)
+	}
+
 	stats := e.stats.ip
 
 	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(len(pkt.NetworkHeader().Slice())))
@@ -987,24 +994,10 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 		innerSrcAddr, innerDstAddr, innerProto, len(innerPkt),
 		localEIP, egressEIP, egressEIP, route.NICID())
 
-	const outerHeaderLen = header.IPv4MinimumSize
-	outerPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		ReserveHeaderBytes:  outerHeaderLen,
-		Payload:             buffer.MakeWithData(innerPkt),
-		IsForwardedPacket:   true,
-	})
-	outerPkt.NetworkProtocolNumber = ProtocolNumber // Set to IPv4 (2048)
+	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
 	defer outerPkt.DecRef()
 
-	outerH := header.IPv4(outerPkt.NetworkHeader().Push(outerHeaderLen))
-	outerH.Encode(&header.IPv4Fields{
-		TotalLength: uint16(outerHeaderLen + len(innerPkt)),
-		TTL:         64,
-		Protocol:    4, // IPIP (IP protocol number 4)
-		SrcAddr:     localEIP,
-		DstAddr:     egressEIP,
-	})
-	outerH.SetChecksum(^outerH.CalculateChecksum())
+	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
 
 	// Diagnostic: log outer header created
 	stack.Logf("ipip", "outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
@@ -1033,6 +1026,93 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 			innerSrcAddr, innerDstAddr, localEIP, egressEIP)
 	}
 	return fwdErr
+}
+
+// newIPIPOuterPacket builds an IPIP-encapsulated packet: the full inner
+// packet (network header + payload, already SNATed) carried as the payload of
+// a new IPv4 header. Outer src is the local EIP (tunnel identity), dst the
+// egress node's EIP; the peer's frame-level decapsulator matches outer dst
+// against its local EIP. Shared by the forwarding and endpoint-originated
+// write paths.
+func newIPIPOuterPacket(localEIP, egressEIP tcpip.Address, innerPkt []byte) *stack.PacketBuffer {
+	const outerHeaderLen = header.IPv4MinimumSize
+	outerPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: outerHeaderLen,
+		Payload:            buffer.MakeWithData(innerPkt),
+		IsForwardedPacket:  true,
+	})
+	outerPkt.NetworkProtocolNumber = ProtocolNumber // Set to IPv4 (2048)
+
+	outerH := header.IPv4(outerPkt.NetworkHeader().Push(outerHeaderLen))
+	outerH.Encode(&header.IPv4Fields{
+		TotalLength: uint16(outerHeaderLen + len(innerPkt)),
+		TTL:         64,
+		Protocol:    4, // IPIP (IP protocol number 4)
+		SrcAddr:     localEIP,
+		DstAddr:     egressEIP,
+	})
+	outerH.SetChecksum(^outerH.CalculateChecksum())
+	return outerPkt
+}
+
+// writeWithIPIPEncapsulation encapsulates an endpoint-originated packet with
+// an IPIP header and sends it out via the normal route table, mirroring
+// forwardWithIPIPEncapsulation for the write path (RouteFunc designated-link
+// sockets). The caller must have already run CheckPostrouting (SNAT) on the
+// inner packet.
+func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketBuffer) tcpip.Error {
+	innerView := pkt.ToView()
+	defer innerView.Release()
+	innerPkt := innerView.AsSlice()
+
+	egressEIP := r.EgressEIP
+	localEIP := e.protocol.stack.IPIPSourceAddress()
+	if localEIP.BitLen() == 0 {
+		localEIP = r.LocalAddress()
+	}
+
+	innerIP := header.IPv4(innerPkt)
+
+	// Diagnostic: log IPIP encapsulation start
+	stack.Logf("ipip", "originate start: inner=%s->%s proto=%d len=%d, outer=%s->%s linkNIC=%d\n",
+		innerIP.SourceAddress(), innerIP.DestinationAddress(), innerIP.Protocol(), len(innerPkt),
+		localEIP, egressEIP, r.NICID())
+
+	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
+	defer outerPkt.DecRef()
+
+	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
+
+	// Diagnostic: log outer header created
+	stack.Logf("ipip", "originate outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
+		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
+
+	// Route the outer packet to the egress EIP through the normal route
+	// table (RouteSelector returns an empty decision for mesh addresses).
+	stk := e.protocol.stack
+	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressEIP, ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		stack.Logf("ipip", "originate FindRoute failed: egressEIP=%s err=%v\n", egressEIP, err)
+		return err
+	}
+	defer outerRoute.Release()
+
+	// Diagnostic: log FindRoute success
+	stack.Logf("ipip", "originate FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
+		egressEIP, outerRoute.NICID(), outerRoute.NeedIPIP)
+
+	// forwardPacketWithRoute expects a header-included packet.
+	fwdErr := e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
+	if fwdErr != nil {
+		stack.Logf("ipip", "originate forwardPacketWithRoute failed: err=%v\n", fwdErr)
+		if other, ok := fwdErr.(*ip.ErrOther); ok {
+			return other.Err
+		}
+		return &tcpip.ErrHostUnreachable{}
+	}
+	stack.Logf("ipip", "originate forwardPacketWithRoute OK: inner=%s->%s outer=%s->%s\n",
+		innerIP.SourceAddress(), innerIP.DestinationAddress(), localEIP, egressEIP)
+	return nil
 }
 
 var handlePacketLogOnce sync.Once

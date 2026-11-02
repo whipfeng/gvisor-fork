@@ -2450,7 +2450,8 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 	if e.RouteFunc != nil {
 		decision := e.RouteFunc()
 		var err tcpip.Error
-		r, err = e.stack.BuildRouteFromDecision(decision, netProto)
+		r, err = e.stack.BuildRouteFromDecision(decision, netProto,
+			e.TransportEndpointInfo.ID.LocalAddress, addr.Addr)
 		if err != nil {
 			return err
 		}
@@ -2463,7 +2464,11 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 	}
 	defer r.Release()
 
-	e.TransportEndpointInfo.ID.LocalAddress = r.LocalAddress()
+	// Only adopt the route's local address when the endpoint was not bound to
+	// a specific one; an explicit bind always wins.
+	if la := e.TransportEndpointInfo.ID.LocalAddress; la.BitLen() == 0 || la == header.IPv4Any || la == header.IPv6Any {
+		e.TransportEndpointInfo.ID.LocalAddress = r.LocalAddress()
+	}
 	e.TransportEndpointInfo.ID.RemoteAddress = r.RemoteAddress()
 	e.TransportEndpointInfo.ID.RemotePort = addr.Port
 

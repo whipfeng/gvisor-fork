@@ -1959,7 +1959,12 @@ func (s *Stack) FindRouteViaNIC(id tcpip.NICID, remoteAddr tcpip.Address, netPro
 // BuildRouteFromDecision constructs a Route from a pre-computed RouteDecision.
 // Phaethon patch #13: used by per-endpoint RouteFunc to bypass the stack-level
 // RouteSelector while reusing the same route construction logic.
-func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.NetworkProtocolNumber) (*Route, tcpip.Error) {
+//
+// localAddr/remoteAddr are the socket's bound source address and the real
+// destination. localAddr may be empty (wildcard bind); the owning NIC is
+// located by address and used as localAddressNIC, while decision.EgressNIC is
+// the outgoing NIC (cross-NIC route, same model as forwarding).
+func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address) (*Route, tcpip.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1972,42 +1977,41 @@ func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.Ne
 		return nil, &tcpip.ErrUnknownNICID{}
 	}
 
-	localAddr := tcpip.Address{}
-	remoteAddr := tcpip.Address{}
-
-	if decision.NeedIPIP && decision.EgressEIP != (tcpip.Address{}) {
-		addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
-		return makeRoute(
-			netProto,
-			tcpip.Address{}, /* gateway */
-			localAddr,
-			remoteAddr,
-			outgoingNIC,
-			outgoingNIC,
-			addressEndpoint,
-			s.handleLocal,
-			false,       /* multicastLoop */
-			0,           /* mtu */
-			true,        /* needIPIP */
-			decision.EgressEIP,
-		), nil
+	// Locate the NIC holding localAddr; it provides the address endpoint and
+	// becomes localAddressNIC. Empty localAddr falls back to the outgoing NIC.
+	localAddressNIC := outgoingNIC
+	if localAddr.BitLen() != 0 {
+		var found bool
+		for _, aNIC := range s.nics {
+			if aNIC.hasAddress(netProto, localAddr) {
+				localAddressNIC = aNIC
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, &tcpip.ErrBadLocalAddress{}
+		}
 	}
 
-	// Non-IPIP: direct via Link NIC
-	addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+	addressEndpoint := s.getAddressEP(localAddressNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+	if addressEndpoint == nil {
+		return nil, &tcpip.ErrBadLocalAddress{}
+	}
+
 	return makeRoute(
 		netProto,
 		tcpip.Address{}, /* gateway */
 		localAddr,
 		remoteAddr,
 		outgoingNIC,
-		outgoingNIC,
+		localAddressNIC,
 		addressEndpoint,
 		s.handleLocal,
-		false,           /* multicastLoop */
-		0,               /* mtu */
-		false,           /* needIPIP */
-		tcpip.Address{}, /* egressEIP */
+		false, /* multicastLoop */
+		0,     /* mtu */
+		decision.NeedIPIP,
+		decision.EgressEIP,
 	), nil
 }
 
