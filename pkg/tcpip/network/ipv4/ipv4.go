@@ -962,18 +962,34 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 		h2.SourceAddress(), h2.DestinationAddress(), h.SourceAddress() != h2.SourceAddress())
 
 	// Inner packet: the full original packet (network header + payload) AFTER SNAT.
+	// Phaethon patch: this encapsulation is one router hop for the inner packet,
+	// so the inner TTL must be checked and decremented here — otherwise the
+	// entry node never counts as a hop (upstream forwardPacketWithRoute's
+	// TTL-1 is bypassed by this branch).
+	h = header.IPv4(pkt.NetworkHeader().Slice())
+	if h.TTL() <= 1 {
+		// Matches Linux iptunnel behaviour: a tunnel ingress with inner TTL
+		// exhausted drops the packet and reports time exceeded to the source.
+		util.LogModuleDebug("gvisor", "IPIP drop: inner TTL=%d exhausted src=%s dst=%s\n",
+			h.TTL(), h.SourceAddress(), h.DestinationAddress())
+		_ = e.protocol.returnError(&icmpReasonTTLExceeded{}, pkt, false /* deliveredLocally */)
+		return &ip.ErrTTLExceeded{}
+	}
 	innerView := pkt.ToView()
 	defer innerView.Release()
 	innerPkt := innerView.AsSlice()
+	innerHdr := header.IPv4(innerPkt)
+	innerHdr.SetTTL(innerHdr.TTL() - 1)
+	innerHdr.SetChecksum(0)
+	innerHdr.SetChecksum(^innerHdr.CalculateChecksum())
 
 	// Parse inner packet for diagnostic logging
-	innerIP := header.IPv4(innerPkt)
 	var innerSrcAddr, innerDstAddr tcpip.Address
 	var innerProto uint8
-	if innerIP.IsValid(len(innerIP)) {
-		innerSrcAddr = innerIP.SourceAddress()
-		innerDstAddr = innerIP.DestinationAddress()
-		innerProto = innerIP.Protocol()
+	if innerHdr.IsValid(len(innerPkt)) {
+		innerSrcAddr = innerHdr.SourceAddress()
+		innerDstAddr = innerHdr.DestinationAddress()
+		innerProto = innerHdr.Protocol()
 	}
 
 	// Outer header per design §4.2:
