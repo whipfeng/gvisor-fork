@@ -172,6 +172,11 @@ type Stack struct {
 	mu stackRWMutex `state:"nosave"`
 	// +checklocks:mu
 	nics map[tcpip.NICID]*nic `state:"nosave"`
+	// nicIDsByName is the reverse index of named NICs (name → NICID),
+	// maintained on NIC create/remove so per-packet name lookups are O(1)
+	// instead of a linear scan of nics.
+	// +checklocks:mu
+	nicIDsByName map[string]tcpip.NICID `state:"nosave"`
 	// +checklocks:mu
 	defaultForwardingEnabled map[tcpip.NetworkProtocolNumber]struct{}
 
@@ -477,6 +482,7 @@ func New(opts Options) *Stack {
 		networkProtocols:             make(map[tcpip.NetworkProtocolNumber]NetworkProtocol),
 		tunnelProtocols:              make(map[tcpip.TransportProtocolNumber]TunnelProtocol),
 		nics:                         make(map[tcpip.NICID]*nic),
+		nicIDsByName:                 make(map[string]tcpip.NICID),
 		packetEndpointWriteSupported: opts.AllowPacketEndpointWrite,
 		defaultForwardingEnabled:     make(map[tcpip.NetworkProtocolNumber]struct{}),
 		cleanupEndpoints:             make(map[TransportEndpoint]struct{}),
@@ -1143,11 +1149,11 @@ func (s *Stack) GetNICByID(id tcpip.NICID) (*nic, tcpip.Error) {
 
 // GetNICByName returns a network device associated with the specified name.
 func (s *Stack) GetNICByName(name string) (*nic, tcpip.Error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	for _, n := range s.nics {
-		if n.name == name {
+	if id, ok := s.nicIDsByName[name]; ok {
+		if n, ok := s.nics[id]; ok {
 			return n, nil
 		}
 	}
@@ -1187,6 +1193,9 @@ func (s *Stack) CreateNICWithOptions(id tcpip.NICID, ep LinkEndpoint, opts NICOp
 		}
 	}
 	s.nics[id] = n
+	if opts.Name != "" {
+		s.nicIDsByName[opts.Name] = id
+	}
 	ep.SetOnCloseAction(func() {
 		s.RemoveNIC(id)
 	})
@@ -1280,6 +1289,9 @@ func (s *Stack) removeNICLocked(id tcpip.NICID) (func(), tcpip.Error) {
 		return nil, &tcpip.ErrUnknownNICID{}
 	}
 	delete(s.nics, id)
+	if nic.name != "" {
+		delete(s.nicIDsByName, nic.name)
+	}
 
 	if nic.Primary != nil {
 		b := nic.Primary.NetworkLinkEndpoint.(CoordinatorNIC)
@@ -2779,12 +2791,7 @@ func (s *Stack) FindNICIDFromName(name string) tcpip.NICID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for id, nic := range s.nics {
-		if nic.Name() == name {
-			return id
-		}
-	}
-	return 0
+	return s.nicIDsByName[name]
 }
 
 // ParseResult indicates the result of a parsing attempt.
@@ -2888,6 +2895,9 @@ func (s *Stack) SetNICStack(id tcpip.NICID, peer *Stack) (tcpip.NICID, tcpip.Err
 		return id, nil
 	}
 	delete(s.nics, id)
+	if nic.name != "" {
+		delete(s.nicIDsByName, nic.name)
+	}
 
 	// Remove routes in-place. n tracks the number of routes written.
 	s.RemoveRoutes(func(r tcpip.Route) bool { return r.NIC == id })
