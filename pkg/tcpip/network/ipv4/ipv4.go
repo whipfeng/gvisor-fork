@@ -16,10 +16,8 @@
 package ipv4
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
-	"net"
 	"reflect"
 	"time"
 
@@ -1504,12 +1502,9 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	// always forward through OutputNICName after reverse NAT restores the client
 	// destination. This bypasses destination policy for per-flow return routing.
 	localStack := e.protocol.stack.RouteSelectorLocalStack(dstAddr)
-	// Phaethon diagnostic: trace the forward-vs-local decision with correlation ID
-	srcIP := net.IP(srcAddr.AsSlice())
-	dstIP := net.IP(dstAddr.AsSlice())
-	corrID := phaethonCorrID(srcIP, dstIP, 0, 0)
-	util.LogModuleDebug("gvisor", "[%s] handleValidatedPacket proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
-		corrID, h.Protocol(), e.nic.ID(), inNICName, e.Forwarding(), pkt.OutputNICName, localStack)
+	// Phaethon diagnostic: trace the forward-vs-local decision
+	util.LogModuleDebug("gvisor", "handleValidatedPacket proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
+		h.Protocol(), e.nic.ID(), inNICName, e.Forwarding(), pkt.OutputNICName, localStack)
 	// Phaethon fix: set InputNICName before forwarding so that CheckPostrouting
 	// can match InputInterface conditions (e.g., SNAT rules matching "tun").
 	// Without this, forwarded packets have empty InputNICName, and iptables
@@ -1523,21 +1518,21 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 		subnet := addressEndpoint.AddressWithPrefix().Subnet()
 		pkt.NetworkPacketInfo.LocalAddressBroadcast = subnet.IsBroadcast(dstAddr) || dstAddr == header.IPv4Broadcast
 		// Phaethon diagnostic: trace local delivery
-		util.LogModuleDebug("gvisor", "[%s] LOCAL_DELIVERY proto=%d nicName=%s\n",
-			corrID, h.Protocol(), inNICName)
+		util.LogModuleDebug("gvisor", "LOCAL_DELIVERY proto=%d nicName=%s\n",
+			h.Protocol(), inNICName)
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else if localStack {
 		// Phaethon patch #14: LocalStack=true but no addressEndpoint (Link NIC in
 		// promiscuous mode). Deliver locally anyway — the RouteSelector determined
 		// this is a local stack destination, and the TCP/UDP forwarder will handle it.
-		util.LogModuleDebug("gvisor", "[%s] LOCAL_DELIVERY_LinkNIC proto=%d nicName=%s\n",
-			corrID, h.Protocol(), inNICName)
+		util.LogModuleDebug("gvisor", "LOCAL_DELIVERY_LinkNIC proto=%d nicName=%s\n",
+			h.Protocol(), inNICName)
 		e.deliverPacketLocally(h, pkt, inNICName)
 	} else {
 		stats.ip.InvalidDestinationAddressesReceived.Increment()
 		// Phaethon diagnostic: trace silent drop
-		util.LogModuleDebug("gvisor", "[%s] DROP localStack=%v forwarding=%v\n",
-			corrID, localStack, e.Forwarding())
+		util.LogModuleDebug("gvisor", "DROP localStack=%v forwarding=%v\n",
+			localStack, e.Forwarding())
 	}
 }
 
@@ -1591,38 +1586,9 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats.Forwarding.Errors.Increment()
 }
 
-// phaethonCorrID computes a deterministic correlation ID from IP and transport headers.
-// Format: <src-ip>:<src-port>-><dst-ip>:<dst-port>
-// Used to link diagnostic logs across the entire packet delivery path.
-func phaethonCorrID(srcIP, dstIP net.IP, srcPort, dstPort uint16) string {
-	return fmt.Sprintf("%s:%d->%s:%d", srcIP, srcPort, dstIP, dstPort)
-}
-
-// phaethonParseTransportPorts extracts src/dst ports from TCP or UDP headers.
-func phaethonParseTransportPorts(pkt *stack.PacketBuffer) (srcPort, dstPort uint16, ok bool) {
-	transport := pkt.TransportHeader().Slice()
-	if len(transport) < 4 {
-		return 0, 0, false
-	}
-	srcPort = binary.BigEndian.Uint16(transport[0:2])
-	dstPort = binary.BigEndian.Uint16(transport[2:4])
-	return srcPort, dstPort, true
-}
-
 func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, inNICName string) {
-	// Phaethon diagnostic: parse transport ports for correlation ID
-	srcAddr := h.SourceAddress()
-	dstAddr := h.DestinationAddress()
-	srcIP := net.IP(srcAddr.AsSlice())
-	dstIP := net.IP(dstAddr.AsSlice())
-	var corrID string
-	if sp, dp, ok := phaethonParseTransportPorts(pkt); ok {
-		corrID = phaethonCorrID(srcIP, dstIP, sp, dp)
-	} else {
-		corrID = phaethonCorrID(srcIP, dstIP, 0, 0)
-	}
-	util.LogModuleDebug("gvisor", "[%s] deliverPacketLocally ENTRY inNIC=%s proto=%d\n",
-		corrID, inNICName, h.Protocol())
+	util.LogModuleDebug("gvisor", "deliverPacketLocally ENTRY inNIC=%s proto=%d\n",
+		inNICName, h.Protocol())
 	stats := e.stats
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
@@ -1639,7 +1605,7 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	}
 	inputOK := e.protocol.stack.IPTables().CheckInput(pkt, inNICName)
 	// Phaethon diagnostic: log CheckInput result for all packets
-	util.LogModuleDebug("gvisor", "[%s] CheckInput ok=%v\n", corrID, inputOK)
+	util.LogModuleDebug("gvisor", "CheckInput ok=%v\n", inputOK)
 	if !inputOK {
 		// iptables is telling us to drop the packet.
 		stats.ip.IPTablesInputDropped.Increment()
@@ -1648,8 +1614,8 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 
 	// Phaethon diagnostic: check if packet is a fragment
 	isFragment := h.More() || h.FragmentOffset() != 0
-	util.LogModuleDebug("gvisor", "[%s] CheckInput OK more=%v fragOff=%d isFragment=%v\n",
-		corrID, h.More(), h.FragmentOffset(), isFragment)
+	util.LogModuleDebug("gvisor", "CheckInput OK more=%v fragOff=%d isFragment=%v\n",
+		h.More(), h.FragmentOffset(), isFragment)
 
 	if h.More() || h.FragmentOffset() != 0 {
 		if pkt.Data().Size()+len(pkt.TransportHeader().Slice()) == 0 {
@@ -1711,8 +1677,8 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 		}
 		if !ready {
 			// Phaethon diagnostic: fragment not ready
-			util.LogModuleDebug("gvisor", "[%s] Fragment NOT READY id=%d fragOff=%d more=%v\n",
-				corrID, h.ID(), h.FragmentOffset(), h.More())
+			util.LogModuleDebug("gvisor", "Fragment NOT READY id=%d fragOff=%d more=%v\n",
+				h.ID(), h.FragmentOffset(), h.More())
 			return
 		}
 		defer resPkt.DecRef()
@@ -1770,18 +1736,9 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 		return
 	}
 
-	// Phaethon diagnostic: verify packet reaches transport layer delivery with correlation ID
-	// Reuse srcAddr/dstAddr from earlier in this function (line 1402-1403)
-	srcIP2 := net.IP(srcAddr.AsSlice())
-	dstIP2 := net.IP(dstAddr.AsSlice())
-	var corrID2 string
-	if sp, dp, ok := phaethonParseTransportPorts(pkt); ok {
-		corrID2 = phaethonCorrID(srcIP2, dstIP2, sp, dp)
-	} else {
-		corrID2 = phaethonCorrID(srcIP2, dstIP2, 0, 0)
-	}
-	util.LogModuleDebug("gvisor", "[%s] DeliverTransportPacket CALL proto=%d nicName=%s\n",
-		corrID2, p, inNICName)
+	// Phaethon diagnostic: verify packet reaches transport layer delivery
+	util.LogModuleDebug("gvisor", "DeliverTransportPacket CALL proto=%d nicName=%s\n",
+		p, inNICName)
 
 	switch res := e.dispatcher.DeliverTransportPacket(p, pkt); res {
 	case stack.TransportPacketHandled:
