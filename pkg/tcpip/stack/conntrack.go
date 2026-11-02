@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -573,28 +571,10 @@ func (ct *ConnTrack) getConnAndUpdate(pkt *PacketBuffer, skipChecksumValidation 
 
 		now := ct.clock.NowMonotonic()
 		if t := bkt.connForTID(tid, now); t != nil {
-			// Debug: log when connection is found
-			if tid.dstPortOrEchoReplyIdent == 53 || tid.srcPortOrEchoRequestIdent == 53 {
-				logPath := filepath.Join(os.TempDir(), "phaethon-conntrack-debug.log")
-				f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err == nil {
-					fmt.Fprintf(f, "[CONNTRACK-DEBUG] Found connection: tid=%+v reply=%v\n", tid, t.reply)
-					f.Close()
-				}
-			}
 			return t
 		}
 
 		if !allowNewConn {
-			// Debug: log when connection not found and new connections not allowed
-			if tid.dstPortOrEchoReplyIdent == 53 || tid.srcPortOrEchoRequestIdent == 53 {
-				logPath := filepath.Join(os.TempDir(), "phaethon-conntrack-debug.log")
-				f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err == nil {
-					fmt.Fprintf(f, "[CONNTRACK-DEBUG] Connection not found (newConn not allowed): tid=%+v\n", tid)
-					f.Close()
-				}
-			}
 			return nil
 		}
 

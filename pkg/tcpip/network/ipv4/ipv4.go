@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
-	"path/filepath"
 	"reflect"
 	"time"
 
@@ -1115,24 +1113,12 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 	return nil
 }
 
-var handlePacketLogOnce sync.Once
-
 // HandlePacket is called by the link layer when new ipv4 packets arrive for
 // this endpoint.
 func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	stats := e.stats.ip
 
 	stats.PacketsReceived.Increment()
-
-	// One-time debug log
-	handlePacketLogOnce.Do(func() {
-		logPath := filepath.Join(os.TempDir(), "phaethon-handlepacket-debug.log")
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			fmt.Fprintf(f, "[HANDLEPACKET-DEBUG] NIC ID=%d name=%s isLoopback=%v\n", e.nic.ID(), e.nic.Name(), e.nic.IsLoopback())
-			f.Close()
-		}
-	})
 
 	if !e.isEnabled() {
 		stats.DisabledPacketsReceived.Increment()
@@ -1589,8 +1575,6 @@ func (e *endpoint) handleForwardingError(err ip.ForwardingError) {
 	stats.Forwarding.Errors.Increment()
 }
 
-var checkInputLogOnce sync.Once
-
 // phaethonCorrID computes a deterministic correlation ID from IP and transport headers.
 // Format: <src-ip>:<src-port>-><dst-ip>:<dst-port>
 // Used to link diagnostic logs across the entire packet delivery path.
@@ -1624,15 +1608,6 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 	util.LogModuleDebug("gvisor", "[%s] deliverPacketLocally ENTRY inNIC=%s proto=%d\n",
 		corrID, inNICName, h.Protocol())
 	stats := e.stats
-	// One-time debug log for CheckInput
-	checkInputLogOnce.Do(func() {
-		logPath := filepath.Join(os.TempDir(), "phaethon-checkinput-debug.log")
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			fmt.Fprintf(f, "[CHECKINPUT-DEBUG] deliverPacketLocally called: inNICName=%s src=%s dst=%s\n", inNICName, h.SourceAddress(), h.DestinationAddress())
-			f.Close()
-		}
-	})
 	// iptables filtering. All packets that reach here are intended for
 	// this machine and will not be forwarded.
 	// Phaethon patch #11: record the input NIC on the packet so that
