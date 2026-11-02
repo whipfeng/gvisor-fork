@@ -1736,17 +1736,44 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 					}
 					if outgoingNIC != nil {
 						addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
-						// Phaethon LinkNIC fallback: LinkNICs in promiscuous mode accept forwarded
-						// packets with any source IP (promiscuous + spoofing mode).
-						// makeRoute handles nil addressEndpoint safely.
-						if addressEndpoint != nil || localAddr.BitLen() > 0 || outgoingNIC.Promiscuous() {
+						// Phaethon patch #15: LinkNICs carry no bound addresses, so an
+						// ordinary socket (RouteSelector path, unlike RouteFunc sockets)
+						// gets a nil addressEndpoint here — and isValidForOutgoing
+						// rejects a nil endpoint on every Write (ErrInvalidEndpointState,
+						// observed on QG as ResolveDomainViaDNS "write: endpoint is in
+						// invalid state"). Locate a usable endpoint instead: explicit
+						// localAddr → its owning NIC (mirrors BuildRouteFromDecision);
+						// wildcard → NIC 1, which has GIP bound and forwarding enabled.
+						// The old Promiscuous() clause that built nil-endpoint routes
+						// here is removed: such a route could never write, it only
+						// deferred failure to Write with a cryptic error. No usable
+						// endpoint now fails fast at construction (fall through →
+						// ErrNoRoute at connect).
+						localAddressNIC := outgoingNIC
+						if addressEndpoint == nil {
+							if localAddr.BitLen() != 0 {
+								for _, aNIC := range s.nics {
+									if aNIC.hasAddress(netProto, localAddr) {
+										localAddressNIC = aNIC
+										addressEndpoint = s.getAddressEP(aNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+										break
+									}
+								}
+							} else if nic1, ok := s.nics[1]; ok && nic1.Enabled() {
+								if ep := s.getAddressEP(nic1, tcpip.Address{}, remoteAddr, tcpip.Address{} /* srcHint */, netProto); ep != nil {
+									localAddressNIC = nic1
+									addressEndpoint = ep
+								}
+							}
+						}
+						if addressEndpoint != nil {
 							return makeRoute(
 								netProto,
 								tcpip.Address{}, /* gateway */
 								localAddr,
 								remoteAddr,
 								outgoingNIC,
-								outgoingNIC, // localAddressNIC = outgoingNIC for LinkNICs
+								localAddressNIC,
 								addressEndpoint,
 								s.handleLocal,
 								multicastLoop,
