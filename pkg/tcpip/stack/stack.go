@@ -122,6 +122,23 @@ type RouteDecision struct {
 // special cases like fakeIP, IPIP encapsulation, etc.
 type RouteSelector func(dst tcpip.Address) RouteDecision
 
+const (
+	// routeDecisionCacheLimit bounds the per-destination decision cache.
+	// On insertion beyond the limit, expired entries are dropped first,
+	// then the oldest entry is evicted.
+	routeDecisionCacheLimit = 4096
+
+	// routeDecisionCacheTTL is how long a cached decision stays valid.
+	// Expired entries are treated as cache misses (lazy eviction).
+	routeDecisionCacheTTL = 5 * time.Minute
+)
+
+// routeDecisionCacheEntry is a cached RouteDecision with its insertion time.
+type routeDecisionCacheEntry struct {
+	decision RouteDecision
+	added    tcpip.MonotonicTime
+}
+
 // Stack is a networking stack, with all supported protocols, NICs, and route
 // table.
 //
@@ -251,8 +268,8 @@ type Stack struct {
 	// address (Phaethon design §2.5). Only decisions with Cacheable=true
 	// are stored; invalidated via ClearRouteDecisionCache on route/topology
 	// changes. Protected by routeDecisionCacheMu.
-	routeDecisionCache   map[tcpip.Address]RouteDecision `state:"nosave"`
-	routeDecisionCacheMu sync.RWMutex                    `state:"nosave"`
+	routeDecisionCache   map[tcpip.Address]routeDecisionCacheEntry `state:"nosave"`
+	routeDecisionCacheMu sync.RWMutex                              `state:"nosave"`
 }
 
 // NetworkProtocolFactory instantiates a network protocol.
@@ -663,34 +680,81 @@ func (s *Stack) GetTunnelProtocol(number tcpip.TransportProtocolNumber) TunnelPr
 	return s.tunnelProtocols[number]
 }
 
-// decisionForSelectorRLocked runs the RouteSelector for dst and applies the
-// §2.5 cache. Caller must hold s.mu (read or write).
-func (s *Stack) decisionForSelectorRLocked(dst tcpip.Address) (RouteDecision, bool) {
-	if s.routeSelector == nil {
+// decisionForSelector runs the RouteSelector for dst and applies the
+// §2.5 cache. It must be called WITHOUT s.mu held: the routeSelector
+// callback is invoked lock-free (it may call back into the stack, and a
+// blocking callback must not stall or deadlock stack readers). The
+// function takes s.mu only in brief read windows.
+func (s *Stack) decisionForSelector(dst tcpip.Address) (RouteDecision, bool) {
+	s.mu.RLock()
+	rs := s.routeSelector
+	s.mu.RUnlock()
+	if rs == nil {
 		return RouteDecision{}, false
 	}
 
+	now := s.clock.NowMonotonic()
+
 	// Cache lookup (§2.5): only decisions flagged Cacheable are stored.
+	// Expired entries are treated as misses and overwritten below.
 	s.routeDecisionCacheMu.RLock()
-	if s.routeDecisionCache != nil {
-		if d, ok := s.routeDecisionCache[dst]; ok {
-			s.routeDecisionCacheMu.RUnlock()
-			return d, true
+	e, ok := s.routeDecisionCache[dst]
+	s.routeDecisionCacheMu.RUnlock()
+	if ok && now.Sub(e.added) < routeDecisionCacheTTL {
+		return e.decision, true
+	}
+
+	decision := rs(dst)
+
+	// Phaethon patch #14 (self-heal): the decision's EgressNIC may reference
+	// a removed or disabled NIC (stale cache entry or selector drift). Verify
+	// under a brief RLock; re-query the selector lock-free if invalid, and
+	// let the fresh (valid) decision fall through to the cache write below.
+	if decision.EgressNIC != 0 && !s.selectorEgressNICValid(decision.EgressNIC) {
+		if fresh := rs(dst); fresh.EgressNIC == 0 || s.selectorEgressNICValid(fresh.EgressNIC) {
+			decision = fresh
 		}
 	}
-	s.routeDecisionCacheMu.RUnlock()
-
-	decision := s.routeSelector(dst)
 
 	if decision.Cacheable {
 		s.routeDecisionCacheMu.Lock()
 		if s.routeDecisionCache == nil {
-			s.routeDecisionCache = make(map[tcpip.Address]RouteDecision)
+			s.routeDecisionCache = make(map[tcpip.Address]routeDecisionCacheEntry)
 		}
-		s.routeDecisionCache[dst] = decision
+		// Bound the cache: drop expired entries first, then evict the oldest.
+		if len(s.routeDecisionCache) >= routeDecisionCacheLimit {
+			for k, ce := range s.routeDecisionCache {
+				if now.Sub(ce.added) >= routeDecisionCacheTTL {
+					delete(s.routeDecisionCache, k)
+				}
+			}
+			for len(s.routeDecisionCache) >= routeDecisionCacheLimit {
+				oldestKey := dst
+				var oldestTime tcpip.MonotonicTime
+				first := true
+				for k, ce := range s.routeDecisionCache {
+					if first || ce.added.Before(oldestTime) {
+						oldestKey = k
+						oldestTime = ce.added
+						first = false
+					}
+				}
+				delete(s.routeDecisionCache, oldestKey)
+			}
+		}
+		s.routeDecisionCache[dst] = routeDecisionCacheEntry{decision: decision, added: now}
 		s.routeDecisionCacheMu.Unlock()
 	}
 	return decision, true
+}
+
+// selectorEgressNICValid reports whether id references an existing, enabled
+// NIC. Takes s.mu in a brief read window; must not be called with s.mu held.
+func (s *Stack) selectorEgressNICValid(id tcpip.NICID) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n, ok := s.nics[id]
+	return ok && n.Enabled()
 }
 
 // RouteSelectorLocalStack reports whether the RouteSelector marks dst as a
@@ -698,9 +762,7 @@ func (s *Stack) decisionForSelectorRLocked(dst tcpip.Address) (RouteDecision, bo
 // handleValidatedPacket and FindRoute; conntrack return packets with an
 // OutputNICName bypass it and forward through their recorded NIC.
 func (s *Stack) RouteSelectorLocalStack(dst tcpip.Address) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	decision, ok := s.decisionForSelectorRLocked(dst)
+	decision, ok := s.decisionForSelector(dst)
 	return ok && decision.LocalStack
 }
 
@@ -1672,6 +1734,16 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 // findRouteInner is FindRoute without the Phaethon patch #10 loopback
 // override.
 func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+	// Phaethon patch #3: Call RouteSelector if set.
+	// All FindRoute calls go through RouteSelector (no condition).
+	// Conntrack-managed return packets use FindRouteViaNIC to bypass RouteSelector.
+	// Phaethon design §2.5: Cacheable decisions are cached per destination;
+	// ClearRouteDecisionCache invalidates on topology changes.
+	// Phaethon patch #14: When the decision's NIC is invalid, the selector is
+	// re-queried lock-free inside decisionForSelector (self-healing cache).
+	// The selector runs BEFORE taking s.mu so its callback executes lock-free.
+	decision, haveSelectorDecision := s.decisionForSelector(remoteAddr)
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1686,106 +1758,91 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 	isLoopback := header.IsV4LoopbackAddress(remoteAddr) || header.IsV6LoopbackAddress(remoteAddr)
 	needRoute := !(isLocalBroadcast || isMulticast || isLinkLocal || isLoopback)
 
-	// Phaethon patch #3: Call RouteSelector if set.
-	// All FindRoute calls go through RouteSelector (no condition).
-	// Conntrack-managed return packets use FindRouteViaNIC to bypass RouteSelector.
-	// Phaethon design §2.5: Cacheable decisions are cached per destination;
-	// ClearRouteDecisionCache invalidates on topology changes.
-	// Phaethon patch #14: When cached decision's NIC is invalid, re-query
-	// RouteSelector to get a fresh path (self-healing cache).
-	if s.routeSelector != nil {
-		decision, ok := s.decisionForSelectorRLocked(remoteAddr)
-		if ok {
-			// Phaethon diagnostic: trace RouteSelector decision
-			util.LogModuleDebug("gvisor", "[ROUTE-SELECTOR] FindRoute localAddr=%s remoteAddr=%s inputNIC=%d -> decision: EgressNIC=%d NeedIPIP=%v LocalStack=%v\n",
-				localAddr, remoteAddr, id, decision.EgressNIC, decision.NeedIPIP, decision.LocalStack)
-			// LocalStack: FindRoute applies its loopback behavior after this
-			// function constructs a route; receive-path delivery is resolved by
-			// handleValidatedPacket before ordinary forwarding.
+	// Phaethon patch #3/#14: apply the (possibly self-healed) selector
+	// decision. LocalStack: FindRoute applies its loopback behavior after this
+	// function constructs a route; receive-path delivery is resolved by
+	// handleValidatedPacket before ordinary forwarding.
+	if haveSelectorDecision {
+		// Phaethon diagnostic: trace RouteSelector decision
+		util.LogModuleDebug("gvisor", "[ROUTE-SELECTOR] FindRoute localAddr=%s remoteAddr=%s inputNIC=%d -> decision: EgressNIC=%d NeedIPIP=%v LocalStack=%v\n",
+			localAddr, remoteAddr, id, decision.EgressNIC, decision.NeedIPIP, decision.LocalStack)
 
-			// Phaethon unified EgressNIC path: handles both IPIP and non-IPIP cases.
-			// The only difference is needIPIP flag and egressEIP in makeRoute.
-			if decision.EgressNIC != 0 {
-				// For IPIP, EgressEIP must be set
-				if decision.NeedIPIP && decision.EgressEIP == (tcpip.Address{}) {
-					// Fall through to normal routing
-				} else {
-					outgoingNIC, nicOK := s.nics[decision.EgressNIC]
-					if !nicOK || !outgoingNIC.Enabled() {
-						// Phaethon patch #14: Cached NIC invalid, re-query RouteSelector
-						freshDecision := s.routeSelector(remoteAddr)
-						decision = freshDecision
-						outgoingNIC, nicOK = s.nics[decision.EgressNIC]
-						if !nicOK || !outgoingNIC.Enabled() {
-							// For IPIP, fall back to NIC 1 if EgressNIC is still invalid
-							if decision.NeedIPIP {
-								outgoingNIC, nicOK = s.nics[1]
-								if !nicOK || !outgoingNIC.Enabled() {
-									outgoingNIC = nil
-									for _, n := range s.nics {
-										if n.Enabled() && s.getAddressEP(n, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto) != nil {
-											outgoingNIC = n
-											break
-										}
-									}
-								}
-							} else {
-								outgoingNIC = nil
+		// Phaethon unified EgressNIC path: handles both IPIP and non-IPIP cases.
+		// The only difference is needIPIP flag and egressEIP in makeRoute.
+		if decision.EgressNIC != 0 {
+			// For IPIP, EgressEIP must be set
+			if decision.NeedIPIP && decision.EgressEIP == (tcpip.Address{}) {
+				// Fall through to normal routing
+			} else {
+				outgoingNIC, nicOK := s.nics[decision.EgressNIC]
+				if !nicOK || !outgoingNIC.Enabled() {
+					// Phaethon patch #14: self-heal already ran lock-free in
+					// decisionForSelector before s.mu was taken; reaching here
+					// means the NIC raced with removal after that check. For
+					// IPIP, fall back to any enabled NIC with a usable address
+					// (the old s.nics[1] special-case is folded into this
+					// scan); otherwise fall through to normal routing.
+					outgoingNIC = nil
+					if decision.NeedIPIP {
+						for _, n := range s.nics {
+							if n.Enabled() && s.getAddressEP(n, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto) != nil {
+								outgoingNIC = n
+								break
 							}
-						}
-					}
-					if outgoingNIC != nil {
-						addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
-						// Phaethon patch #15: LinkNICs carry no bound addresses, so an
-						// ordinary socket (RouteSelector path, unlike RouteFunc sockets)
-						// gets a nil addressEndpoint here — and isValidForOutgoing
-						// rejects a nil endpoint on every Write (ErrInvalidEndpointState,
-						// observed on QG as ResolveDomainViaDNS "write: endpoint is in
-						// invalid state"). Locate a usable endpoint instead: explicit
-						// localAddr → its owning NIC (mirrors BuildRouteFromDecision);
-						// wildcard → NIC 1, which has GIP bound and forwarding enabled.
-						// The old Promiscuous() clause that built nil-endpoint routes
-						// here is removed: such a route could never write, it only
-						// deferred failure to Write with a cryptic error. No usable
-						// endpoint now fails fast at construction (fall through →
-						// ErrNoRoute at connect).
-						localAddressNIC := outgoingNIC
-						if addressEndpoint == nil {
-							if localAddr.BitLen() != 0 {
-								for _, aNIC := range s.nics {
-									if aNIC.hasAddress(netProto, localAddr) {
-										localAddressNIC = aNIC
-										addressEndpoint = s.getAddressEP(aNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
-										break
-									}
-								}
-							} else if nic1, ok := s.nics[1]; ok && nic1.Enabled() {
-								if ep := s.getAddressEP(nic1, tcpip.Address{}, remoteAddr, tcpip.Address{} /* srcHint */, netProto); ep != nil {
-									localAddressNIC = nic1
-									addressEndpoint = ep
-								}
-							}
-						}
-						if addressEndpoint != nil {
-							return makeRoute(
-								netProto,
-								tcpip.Address{}, /* gateway */
-								localAddr,
-								remoteAddr,
-								outgoingNIC,
-								localAddressNIC,
-								addressEndpoint,
-								s.handleLocal,
-								multicastLoop,
-								0,               /* mtu */
-								decision.NeedIPIP,
-								decision.EgressEIP,
-							), nil
 						}
 					}
 				}
-				// Fall through to normal routing if EgressNIC is invalid
+				if outgoingNIC != nil {
+					addressEndpoint := s.getAddressEP(outgoingNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+					// Phaethon patch #15: LinkNICs carry no bound addresses, so an
+					// ordinary socket (RouteSelector path, unlike RouteFunc sockets)
+					// gets a nil addressEndpoint here — and isValidForOutgoing
+					// rejects a nil endpoint on every Write (ErrInvalidEndpointState,
+					// observed on QG as ResolveDomainViaDNS "write: endpoint is in
+					// invalid state"). Locate a usable endpoint instead: explicit
+					// localAddr → its owning NIC (mirrors BuildRouteFromDecision);
+					// wildcard → NIC 1, which has GIP bound and forwarding enabled.
+					// The old Promiscuous() clause that built nil-endpoint routes
+					// here is removed: such a route could never write, it only
+					// deferred failure to Write with a cryptic error. No usable
+					// endpoint now fails fast at construction (fall through →
+					// ErrNoRoute at connect).
+					localAddressNIC := outgoingNIC
+					if addressEndpoint == nil {
+						if localAddr.BitLen() != 0 {
+							for _, aNIC := range s.nics {
+								if aNIC.hasAddress(netProto, localAddr) {
+									localAddressNIC = aNIC
+									addressEndpoint = s.getAddressEP(aNIC, localAddr, remoteAddr, tcpip.Address{} /* srcHint */, netProto)
+									break
+								}
+							}
+						} else if nic1, ok := s.nics[1]; ok && nic1.Enabled() {
+							if ep := s.getAddressEP(nic1, tcpip.Address{}, remoteAddr, tcpip.Address{} /* srcHint */, netProto); ep != nil {
+								localAddressNIC = nic1
+								addressEndpoint = ep
+							}
+						}
+					}
+					if addressEndpoint != nil {
+						return makeRoute(
+							netProto,
+							tcpip.Address{}, /* gateway */
+							localAddr,
+							remoteAddr,
+							outgoingNIC,
+							localAddressNIC,
+							addressEndpoint,
+							s.handleLocal,
+							multicastLoop,
+							0, /* mtu */
+							decision.NeedIPIP,
+							decision.EgressEIP,
+						), nil
+					}
+				}
 			}
+			// Fall through to normal routing if EgressNIC is invalid
 		}
 	}
 
