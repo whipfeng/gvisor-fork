@@ -582,7 +582,7 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 	// Phaethon diagnostic: log PacketOut check for IPIP
 	ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
 	if ipHdr.Protocol() == 4 { // IPIP
-		stack.Logf("ipip", "writePacketPostRouting: proto=4 loop=%d packetOut=%v\n",
+		util.LogModuleDebug("ipip", "writePacketPostRouting: proto=4 loop=%d packetOut=%v\n",
 			r.Loop(), r.Loop()&stack.PacketOut != 0)
 	}
 	if r.Loop()&stack.PacketOut == 0 {
@@ -811,12 +811,12 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	srcAddr := h.SourceAddress()
 
 	// Phaethon diagnostic: entry point
-	stack.Logf("forward", "forwardUnicastPacket ENTRY: src=%s dst=%s proto=%d ttl=%d\n",
+	util.LogModuleDebug("forward", "forwardUnicastPacket ENTRY: src=%s dst=%s proto=%d ttl=%d\n",
 		srcAddr, dstAddr, h.Protocol(), h.TTL())
 
 	if err := validateAddressesForForwarding(h); err != nil {
 		// Phaethon diagnostic: address validation failed
-		stack.Logf("forward", "validateAddressesForForwarding FAILED: src=%s dst=%s err=%T\n",
+		util.LogModuleDebug("forward", "validateAddressesForForwarding FAILED: src=%s dst=%s err=%T\n",
 			srcAddr, dstAddr, err)
 		return err
 	}
@@ -824,7 +824,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	ttl := h.TTL()
 	if ttl == 0 {
 		// Phaethon diagnostic: TTL exceeded
-		stack.Logf("forward", "TTL=0 exceeded: src=%s dst=%s\n",
+		util.LogModuleDebug("forward", "TTL=0 exceeded: src=%s dst=%s\n",
 			srcAddr, dstAddr)
 		// As per RFC 792 page 6, Time Exceeded Message,
 		//
@@ -841,7 +841,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 
 	if err := e.updateOptionsForForwarding(pkt); err != nil {
 		// Phaethon diagnostic: updateOptions failed
-		stack.Logf("forward", "updateOptionsForForwarding FAILED: src=%s dst=%s err=%T\n",
+		util.LogModuleDebug("forward", "updateOptionsForForwarding FAILED: src=%s dst=%s err=%T\n",
 			srcAddr, dstAddr, err)
 		return err
 	}
@@ -861,20 +861,20 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	if pkt.OutputNICName != "" {
 		if nicID := stk.FindNICIDFromName(pkt.OutputNICName); nicID != 0 {
 			// Phaethon diagnostic: DNAT reply routing path
-			stack.Logf("forward", "OutputNICName path: src=%s dst=%s nicName=%s nicID=%d\n",
+			util.LogModuleDebug("forward", "OutputNICName path: src=%s dst=%s nicName=%s nicID=%d\n",
 				srcAddr, dstAddr, pkt.OutputNICName, nicID)
 			r, err := stk.FindRouteViaNIC(nicID, dstAddr, ProtocolNumber, false /* multicastLoop */)
 			switch err.(type) {
 			case nil:
 			case *tcpip.ErrHostUnreachable, *tcpip.ErrNetworkUnreachable, *tcpip.ErrUnknownNICID:
 				// Phaethon diagnostic: FindRouteViaNIC failed
-				stack.Logf("forward", "FindRouteViaNIC FAILED: src=%s dst=%s err=%T\n",
+				util.LogModuleDebug("forward", "FindRouteViaNIC FAILED: src=%s dst=%s err=%T\n",
 					srcAddr, dstAddr, err)
 				_ = e.protocol.returnError(&icmpReasonNetworkUnreachable{}, pkt, false /* deliveredLocally */)
 				return &ip.ErrHostUnreachable{}
 			default:
 				// Phaethon diagnostic: FindRouteViaNIC other error
-				stack.Logf("forward", "FindRouteViaNIC OTHER ERROR: src=%s dst=%s err=%v\n",
+				util.LogModuleDebug("forward", "FindRouteViaNIC OTHER ERROR: src=%s dst=%s err=%v\n",
 					srcAddr, dstAddr, err)
 				return &ip.ErrOther{Err: err}
 			}
@@ -887,13 +887,13 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 	switch err.(type) {
 	case nil:
 		// Phaethon diagnostic: FindRoute succeeded
-		stack.Logf("forward", "FindRoute SUCCESS: src=%s dst=%s\n",
+		util.LogModuleDebug("forward", "FindRoute SUCCESS: src=%s dst=%s\n",
 			srcAddr, dstAddr)
 	// TODO(https://gvisor.dev/issues/8105): We should not observe ErrHostUnreachable from route
 	// lookups.
 	case *tcpip.ErrHostUnreachable, *tcpip.ErrNetworkUnreachable:
 		// Phaethon diagnostic: FindRoute unreachable
-		stack.Logf("forward", "FindRoute UNREACHABLE: src=%s dst=%s err=%T\n",
+		util.LogModuleDebug("forward", "FindRoute UNREACHABLE: src=%s dst=%s err=%T\n",
 			srcAddr, dstAddr, err)
 		// We return the original error rather than the result of returning
 		// the ICMP packet because the original error is more relevant to
@@ -902,7 +902,7 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 		return &ip.ErrHostUnreachable{}
 	default:
 		// Phaethon diagnostic: FindRoute other error
-		stack.Logf("forward", "FindRoute OTHER ERROR: src=%s dst=%s err=%v\n",
+		util.LogModuleDebug("forward", "FindRoute OTHER ERROR: src=%s dst=%s err=%v\n",
 			srcAddr, dstAddr, err)
 		return &ip.ErrOther{Err: err}
 	}
@@ -944,19 +944,19 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	
 	// Phaethon diagnostic: log before CheckPostrouting
 	h := header.IPv4(pkt.NetworkHeader().Slice())
-	stack.Logf("ipip", "CheckPostrouting BEFORE: src=%s dst=%s inNIC=%q outNIC=%q\n",
+	util.LogModuleDebug("ipip", "CheckPostrouting BEFORE: src=%s dst=%s inNIC=%q outNIC=%q\n",
 		h.SourceAddress(), h.DestinationAddress(), inNicName, outNicName)
 	
 	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, route, e, inNicName, outNicName); !ok {
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
-		stack.Logf("ipip", "CheckPostrouting DROP: src=%s dst=%s inNIC=%s outNIC=%s\n",
+		util.LogModuleDebug("ipip", "CheckPostrouting DROP: src=%s dst=%s inNIC=%s outNIC=%s\n",
 			pkt.NetworkHeader().Slice()[12:16], pkt.NetworkHeader().Slice()[16:20], inNicName, outNicName)
 		return nil // Packet dropped by iptables
 	}
 	
 	// Phaethon diagnostic: log after CheckPostrouting (SNAT may have changed src)
 	h2 := header.IPv4(pkt.NetworkHeader().Slice())
-	stack.Logf("ipip", "CheckPostrouting PASS: src=%s dst=%s (SNAT applied: %v)\n",
+	util.LogModuleDebug("ipip", "CheckPostrouting PASS: src=%s dst=%s (SNAT applied: %v)\n",
 		h2.SourceAddress(), h2.DestinationAddress(), h.SourceAddress() != h2.SourceAddress())
 
 	// Inner packet: the full original packet (network header + payload) AFTER SNAT.
@@ -1002,7 +1002,7 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	}
 
 	// Diagnostic: log IPIP encapsulation start
-	stack.Logf("ipip", "start: inner=%s->%s proto=%d len=%d, outer=%s->%s egressEIP=%s linkNIC=%d\n",
+	util.LogModuleDebug("ipip", "start: inner=%s->%s proto=%d len=%d, outer=%s->%s egressEIP=%s linkNIC=%d\n",
 		innerSrcAddr, innerDstAddr, innerProto, len(innerPkt),
 		localEIP, egressEIP, egressEIP, route.NICID())
 
@@ -1012,7 +1012,7 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
 
 	// Diagnostic: log outer header created
-	stack.Logf("ipip", "outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
+	util.LogModuleDebug("ipip", "outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
 		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
 
 	// Route the outer packet to the egress EIP through the normal route
@@ -1020,21 +1020,21 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	stk := e.protocol.stack
 	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressEIP, ProtocolNumber, false /* multicastLoop */)
 	if err != nil {
-		stack.Logf("ipip", "FindRoute failed: egressEIP=%s err=%v\n", egressEIP, err)
+		util.LogModuleDebug("ipip", "FindRoute failed: egressEIP=%s err=%v\n", egressEIP, err)
 		return &ip.ErrOther{Err: err}
 	}
 	defer outerRoute.Release()
 
 	// Diagnostic: log FindRoute success
-	stack.Logf("ipip", "FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
+	util.LogModuleDebug("ipip", "FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
 		egressEIP, outerRoute.NICID(), outerRoute.NeedIPIP)
 
 	// forwardPacketWithRoute expects a header-included packet.
 	fwdErr := e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
 	if fwdErr != nil {
-		stack.Logf("ipip", "forwardPacketWithRoute failed: err=%v\n", fwdErr)
+		util.LogModuleDebug("ipip", "forwardPacketWithRoute failed: err=%v\n", fwdErr)
 	} else {
-		stack.Logf("ipip", "forwardPacketWithRoute OK: inner=%s->%s outer=%s->%s\n",
+		util.LogModuleDebug("ipip", "forwardPacketWithRoute OK: inner=%s->%s outer=%s->%s\n",
 			innerSrcAddr, innerDstAddr, localEIP, egressEIP)
 	}
 	return fwdErr
@@ -1086,7 +1086,7 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 	innerIP := header.IPv4(innerPkt)
 
 	// Diagnostic: log IPIP encapsulation start
-	stack.Logf("ipip", "originate start: inner=%s->%s proto=%d len=%d, outer=%s->%s linkNIC=%d\n",
+	util.LogModuleDebug("ipip", "originate start: inner=%s->%s proto=%d len=%d, outer=%s->%s linkNIC=%d\n",
 		innerIP.SourceAddress(), innerIP.DestinationAddress(), innerIP.Protocol(), len(innerPkt),
 		localEIP, egressEIP, r.NICID())
 
@@ -1096,7 +1096,7 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
 
 	// Diagnostic: log outer header created
-	stack.Logf("ipip", "originate outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
+	util.LogModuleDebug("ipip", "originate outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
 		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
 
 	// Route the outer packet to the egress EIP through the normal route
@@ -1104,25 +1104,25 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 	stk := e.protocol.stack
 	outerRoute, err := stk.FindRoute(0, tcpip.Address{}, egressEIP, ProtocolNumber, false /* multicastLoop */)
 	if err != nil {
-		stack.Logf("ipip", "originate FindRoute failed: egressEIP=%s err=%v\n", egressEIP, err)
+		util.LogModuleDebug("ipip", "originate FindRoute failed: egressEIP=%s err=%v\n", egressEIP, err)
 		return err
 	}
 	defer outerRoute.Release()
 
 	// Diagnostic: log FindRoute success
-	stack.Logf("ipip", "originate FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
+	util.LogModuleDebug("ipip", "originate FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
 		egressEIP, outerRoute.NICID(), outerRoute.NeedIPIP)
 
 	// forwardPacketWithRoute expects a header-included packet.
 	fwdErr := e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
 	if fwdErr != nil {
-		stack.Logf("ipip", "originate forwardPacketWithRoute failed: err=%v\n", fwdErr)
+		util.LogModuleDebug("ipip", "originate forwardPacketWithRoute failed: err=%v\n", fwdErr)
 		if other, ok := fwdErr.(*ip.ErrOther); ok {
 			return other.Err
 		}
 		return &tcpip.ErrHostUnreachable{}
 	}
-	stack.Logf("ipip", "originate forwardPacketWithRoute OK: inner=%s->%s outer=%s->%s\n",
+	util.LogModuleDebug("ipip", "originate forwardPacketWithRoute OK: inner=%s->%s outer=%s->%s\n",
 		innerIP.SourceAddress(), innerIP.DestinationAddress(), localEIP, egressEIP)
 	return nil
 }
@@ -1429,13 +1429,13 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	// If a handler is registered for this protocol number and wants to decapsulate
 	// this packet, do so and recursively process the inner packet.
 	if tunnelProto := e.protocol.stack.GetTunnelProtocol(h.TransportProtocol()); tunnelProto != nil {
-		stack.Logf("ipip", "proto=%d tunnel handler found\n", h.TransportProtocol())
+		util.LogModuleDebug("ipip", "proto=%d tunnel handler found\n", h.TransportProtocol())
 		if tunnelProto.ShouldDecapsulate(pkt) {
-			stack.Logf("ipip", "ShouldDecapsulate returned true\n")
+			util.LogModuleDebug("ipip", "ShouldDecapsulate returned true\n")
 			innerPkt := tunnelProto.Decapsulate(pkt)
 			if innerPkt != nil {
 				defer innerPkt.DecRef()
-				stack.Logf("ipip", "calling HandlePacket for inner packet (full flow with parseAndValidate)\n")
+				util.LogModuleDebug("ipip", "calling HandlePacket for inner packet (full flow with parseAndValidate)\n")
 				// Process inner packet through the full HandlePacket flow.
 				// HandlePacket calls parseAndValidate which parses the IP header
 				// from Data() into NetworkHeader, then parses the transport header.
@@ -1444,7 +1444,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 				e.HandlePacket(innerPkt)
 				return
 			}
-			stack.Logf("ipip", "Decapsulate returned nil\n")
+			util.LogModuleDebug("ipip", "Decapsulate returned nil\n")
 		}
 		// Handler doesn't want to decapsulate this packet, continue with normal processing
 	}
