@@ -45,25 +45,6 @@ const (
 	DefaultTOS = 0
 )
 
-// LogFunc is a logging function type for injecting custom log implementations.
-type LogFunc func(module string, format string, args ...interface{})
-
-var logFunc LogFunc = func(module string, format string, args ...interface{}) {
-	util.LogModuleDebug(module, format, args...)
-}
-
-// SetLogFunc injects a custom logging function for gVisor diagnostic logs.
-func SetLogFunc(f LogFunc) {
-	if f != nil {
-		logFunc = f
-	}
-}
-
-// Logf logs a message using the injected logging function.
-func Logf(module string, format string, args ...interface{}) {
-	logFunc(module, format, args...)
-}
-
 // +stateify savable
 type transportProtocolState struct {
 	proto          TransportProtocol
