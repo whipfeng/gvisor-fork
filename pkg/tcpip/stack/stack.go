@@ -1345,7 +1345,18 @@ func (s *Stack) SetNICName(id tcpip.NICID, name string) tcpip.Error {
 	if !ok {
 		return &tcpip.ErrUnknownNICID{}
 	}
+	// Phaethon: keep nicIDsByName (ab8f48a) in sync — phaethon names every
+	// NIC via SetNICName after CreateNIC, so the reverse index would
+	// otherwise stay empty and FindNICIDFromName/GetNICByName would never
+	// resolve, silently killing the DNAT-reply OutputNICName fast path
+	// (mesh replies to TUN clients RST'd as "no endpoint found").
+	if nic.name != "" {
+		delete(s.nicIDsByName, nic.name)
+	}
 	nic.name = name
+	if name != "" {
+		s.nicIDsByName[name] = id
+	}
 	return nil
 }
 
