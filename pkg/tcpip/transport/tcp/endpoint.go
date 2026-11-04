@@ -624,6 +624,16 @@ func calculateAdvertisedMSS(userMSS uint16, r *stack.Route) uint16 {
 	// TODO(b/143359391): Respect TCP Min and Max size.
 	maxMSS := uint16(r.MTU() - header.TCPMinimumSize)
 
+	// Phaethon: cap the advertised MSS at 1460 (1500 - IPv4/TCP headers) so
+	// in-stack endpoints never emit packets larger than the 1500 TUN MTU.
+	// Without this, the 1600 link MTU (kept for IPIP outer-header headroom)
+	// yields MSS 1560 and oversized packets fail the TUN write path on any
+	// node whose TUN MTU is 1500, including pre-upgrade mesh peers.
+	const maxAdvertisedMSS = 1460
+	if maxMSS > maxAdvertisedMSS {
+		maxMSS = maxAdvertisedMSS
+	}
+
 	if userMSS != 0 && userMSS < maxMSS {
 		return userMSS
 	}
