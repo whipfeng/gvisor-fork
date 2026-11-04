@@ -19,6 +19,7 @@ package channel
 
 import (
 	"context"
+	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -48,6 +49,8 @@ type queue struct {
 	notify []*NotificationHandle
 	// +checklocks:mu
 	closed bool
+	// dropped counts packets silently discarded because the queue was full.
+	dropped atomic.Uint32
 }
 
 func (q *queue) Close() {
@@ -92,6 +95,10 @@ func (q *queue) Write(pkt *stack.PacketBuffer) tcpip.Error {
 		wrote = true
 	default:
 		p.DecRef()
+		// Phaethon: count silent tail drops so the node operator can see
+		// when the outbound queue saturates (previously undetectable —
+		// WritePackets swallows the error into a partial-write-nil return).
+		q.dropped.Add(1)
 	}
 	notify := q.notify
 	q.mu.RUnlock()
@@ -196,6 +203,13 @@ func (e *Endpoint) Drain() int {
 // NumQueued returns the number of packet queued for outbound.
 func (e *Endpoint) NumQueued() int {
 	return e.q.Num()
+}
+
+// DroppedPackets returns the number of packets silently discarded because the
+// outbound queue was full (Phaethon observability; the drop is otherwise
+// invisible because WritePackets reports partial writes as nil errors).
+func (e *Endpoint) DroppedPackets() uint32 {
+	return e.q.dropped.Load()
 }
 
 // InjectInbound injects an inbound packet. If the endpoint is not attached, the
