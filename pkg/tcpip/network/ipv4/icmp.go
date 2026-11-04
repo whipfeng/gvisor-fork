@@ -591,7 +591,15 @@ func (*icmpReasonNetworkUnreachable) isICMPReason() {}
 // icmpReasonFragmentationNeeded is an error where a packet requires
 // fragmentation while also having the Don't Fragment flag set, as per RFC 792
 // page 3, Destination Unreachable Message.
-type icmpReasonFragmentationNeeded struct{}
+//
+// mtu is the next-hop MTU (total IP datagram size the outgoing link accepts);
+// it is carried in the ICMPv4 Frag-Needed MTU field (RFC 1191 §4). Upstream
+// gVisor left this field uninitialized (pooled header memory), so receivers
+// clamped PMTU to garbage — observed in the wild as a peer's TCP degrading to
+// 1-byte segments after one oversized datagram.
+type icmpReasonFragmentationNeeded struct {
+	mtu uint32
+}
 
 func (*icmpReasonFragmentationNeeded) isICMPReason() {}
 
@@ -788,6 +796,22 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer, deliv
 	icmpHdr.SetCode(icmpCode)
 	icmpHdr.SetType(icmpType)
 	icmpHdr.SetPointer(pointer)
+	if reason, ok := reason.(*icmpReasonFragmentationNeeded); ok {
+		// RFC 1191 §4: bytes 6-7 of a Frag-Needed message hold the next-hop
+		// MTU. The header is pushed from pooled memory — write the field
+		// explicitly (and clear the unused bytes 4-5) so receivers never
+		// see stale garbage.
+		mtu := reason.mtu
+		const maxICMPv4MTU = 0xFFFF
+		if mtu > maxICMPv4MTU {
+			mtu = maxICMPv4MTU
+		}
+		if mtu < header.IPv4MinimumMTU {
+			mtu = header.IPv4MinimumMTU
+		}
+		icmpHdr[5] = 0 // unused byte — clear pooled garbage
+		icmpHdr.SetMTU(uint16(mtu))
+	}
 	icmpHdr.SetChecksum(header.ICMPv4Checksum(icmpHdr, icmpPkt.Data().Checksum()))
 
 	if err := route.WritePacket(
