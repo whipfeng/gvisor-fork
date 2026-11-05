@@ -2012,6 +2012,9 @@ func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Addre
 // pkt.OutputNICName, and forwardUnicastPacket routes the reply out through
 // that NIC directly — no host-LAN route entry required for forwarded flows.
 // Mirrors FindRoute's early branch (gateway empty, direct NIC route).
+//
+// Phaethon patch #15: Always creates a route. The packet already has its own
+// source address, so no local address endpoint is needed.
 func (s *Stack) FindRouteViaNIC(id tcpip.NICID, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2025,23 +2028,23 @@ func (s *Stack) FindRouteViaNIC(id tcpip.NICID, remoteAddr tcpip.Address, netPro
 		return nil, &tcpip.ErrUnknownNICID{}
 	}
 
-	if addressEndpoint := s.getAddressEP(nic, tcpip.Address{} /* localAddr */, remoteAddr, tcpip.Address{} /* srcHint */, netProto); addressEndpoint != nil {
-		return makeRoute(
-			netProto,
-			tcpip.Address{}, /* gateway */
-			tcpip.Address{}, /* localAddr - filled from the endpoint; forwarded packets keep their own source */
-			remoteAddr,
-			nic, /* outgoingNIC */
-			nic, /* localAddressNIC */
-			addressEndpoint,
-			s.handleLocal,
-			multicastLoop,
-			0,               /* mtu */
-			false,           /* needIPIP */
-			tcpip.Address{}, /* egressEIP */
-		), nil
-	}
-	return nil, &tcpip.ErrNetworkUnreachable{}
+	// Phaethon patch #15: Create route without address endpoint.
+	// For DNAT reply routing, the packet already has its own source address,
+	// so we don't need a local address endpoint to determine the source IP.
+	return makeRoute(
+		netProto,
+		tcpip.Address{}, /* gateway */
+		tcpip.Address{}, /* localAddr - empty, packet keeps its own source */
+		remoteAddr,
+		nic, /* outgoingNIC */
+		nic, /* localAddressNIC */
+		nil, /* addressEndpoint - not needed */
+		s.handleLocal,
+		multicastLoop,
+		0,               /* mtu */
+		false,           /* needIPIP */
+		tcpip.Address{}, /* egressEIP */
+	), nil
 }
 
 // BuildRouteFromDecision constructs a Route from a pre-computed RouteDecision.

@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".qoder/hooks/block-dangerous-git.sh",
+            "name": "block-dangerous-git",
+            "statusMessage": "Checking git safety..."
+          }
+        ]
+      }
+    ]
+  }
+}
