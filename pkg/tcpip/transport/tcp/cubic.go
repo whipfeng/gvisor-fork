@@ -185,7 +185,7 @@ func (c *cubicState) updateSlowStart(packetsAcked int) int {
 	}
 
 	packetsAcked -= newcwnd - c.s.SndCwnd
-	c.s.SndCwnd = newcwnd
+	c.s.SndCwnd = max(newcwnd, 1)
 	if enterCA {
 		c.enterCongestionAvoidance()
 	}
@@ -210,7 +210,7 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 		c.s.rtt.Lock()
 		srtt := c.s.rtt.TCPRTTState.SRTT
 		c.s.rtt.Unlock()
-		c.s.SndCwnd = c.getCwnd(packetsAcked, c.s.SndCwnd, srtt)
+		c.s.SndCwnd = max(c.getCwnd(packetsAcked, c.s.SndCwnd, srtt), 1)
 	}
 }
 
