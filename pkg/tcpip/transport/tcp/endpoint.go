@@ -937,6 +937,7 @@ func newEndpoint(s *stack.Stack, protocol *protocol, netProto tcpip.NetworkProto
 	// established.
 	e.keepalive.timer.init(e.stack.Clock(), timerHandler(e, e.keepaliveTimerExpired))
 
+	registerDebugEndpoint(e)
 	return e
 }
 
@@ -1254,6 +1255,7 @@ func (e *Endpoint) cleanupLocked() {
 	}
 	e.stack.CompleteTransportEndpointCleanup(e)
 	tcpip.DeleteDanglingEndpoint(e)
+	unregisterDebugEndpoint(e)
 }
 
 // wndFromSpace returns the window that we can advertise based on the available

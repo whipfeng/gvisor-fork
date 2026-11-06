@@ -849,6 +849,10 @@ func (e *Endpoint) sendTCP(r *stack.Route, tf tcpFields, pkt *stack.PacketBuffer
 	tf.txHash = e.txHash
 	if err := sendTCP(r, tf, pkt, gso, e.owner); err != nil {
 		e.stats.SendErrors.SegmentSendToNetworkFailed.Increment()
+		util.LogModuleError("gvisor", "[TCP-SEND] failed: local=%s:%d remote=%s:%d state=%s flags=%v seq=%d ack=%d payload=%d routeLocal=%s nicID=%d mtu=%d err=%T %v",
+			tf.id.LocalAddress, tf.id.LocalPort, tf.id.RemoteAddress, tf.id.RemotePort,
+			e.EndpointState(), tf.flags, tf.seq, tf.ack, pkt.Data().Size(),
+			r.LocalAddress(), r.NICID(), r.MTU(), err, err)
 		return err
 	}
 	e.stats.SegmentsSent.Increment()
