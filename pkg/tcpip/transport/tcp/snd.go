@@ -84,6 +84,13 @@ type congestionControl interface {
 	PostRecovery()
 }
 
+// undoer is implemented by congestion control algorithms that keep state of
+// their own which must be restored when a reduction is undone.
+type undoer interface {
+	saveUndo()
+	undo()
+}
+
 // lossRecovery is an interface that must be implemented by any supported
 // loss recovery algorithm.
 type lossRecovery interface {
@@ -175,6 +182,13 @@ type sender struct {
 	// segment after entering an RTO for the first time as described in
 	// RFC3522 Section 3.2.
 	retransmitTS uint32
+
+	// undoValid is set when undoCwnd/undoSsthresh hold the values from just
+	// before the current loss-recovery reduction (Eifel response, RFC 4015).
+	undoValid    bool `state:"nosave"`
+	undoPending  bool `state:"nosave"`
+	undoCwnd     int  `state:"nosave"`
+	undoSsthresh int  `state:"nosave"`
 
 	// sackedOutsideRecovery is the number of packets that were newly
 	// SACKed while no loss recovery was in progress. SetPipe() only
@@ -550,6 +564,9 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 	// See: https://www.rfc-editor.org/rfc/rfc3522.html#section-3.2 Step 1.
 	s.spuriousRecovery = false
 	s.retransmitTS = 0
+	// Spurious RTOs are not undone: go-back-N resend with a restored window
+	// would burst.
+	s.invalidateUndo()
 
 	// TODO(b/147297758): Band-aid fix, retransmitTimer can fire in some edge cases
 	// when writeList is empty. Remove this once we have a proper fix for this
@@ -1185,7 +1202,42 @@ func (s *sender) leaveRecovery() {
 
 	// Deflate cwnd. It had been artificially inflated when new dups arrived.
 	s.SndCwnd = s.Ssthresh
+	if s.undoPending {
+		s.applyUndo()
+		return
+	}
 	s.cc.PostRecovery()
+}
+
+// reduceForLoss snapshots the congestion state, then applies the loss
+// reduction, so a later spurious-recovery detection can undo it.
+//
+// +checklocks:s.ep.mu
+func (s *sender) reduceForLoss() {
+	s.undoCwnd, s.undoSsthresh = s.SndCwnd, s.Ssthresh
+	if u, ok := s.cc.(undoer); ok {
+		u.saveUndo()
+	}
+	s.undoValid, s.undoPending = true, false
+	s.cc.HandleLossDetected()
+}
+
+// +checklocks:s.ep.mu
+func (s *sender) invalidateUndo() {
+	s.undoValid, s.undoPending = false, false
+}
+
+// applyUndo restores the congestion state saved by reduceForLoss.
+//
+// +checklocks:s.ep.mu
+func (s *sender) applyUndo() {
+	s.SndCwnd = max(s.SndCwnd, s.undoCwnd)
+	s.Ssthresh = max(s.Ssthresh, s.undoSsthresh)
+	if u, ok := s.cc.(undoer); ok {
+		u.undo()
+	}
+	s.invalidateUndo()
+	s.ep.stack.Stats().TCP.SpuriousRecoveryUndo.Increment()
 }
 
 // isAssignedSequenceNumber relies on the fact that we only set flags once a
@@ -1310,7 +1362,7 @@ func (s *sender) detectLoss(seg *segment) (fastRetransmit bool) {
 		s.DupAckCount = 0
 		return false
 	}
-	s.cc.HandleLossDetected()
+	s.reduceForLoss()
 	s.enterRecovery()
 	return true
 }
@@ -1519,6 +1571,21 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// number of timeout recoveries.
 	if s.state == tcpip.RTORecovery {
 		s.ep.stack.Stats().TCP.SpuriousRTORecovery.Increment()
+	}
+
+	if !s.undoValid || (s.state != tcpip.SACKRecovery && s.state != tcpip.FastRecovery) {
+		return
+	}
+	if !s.FastRecovery.Active {
+		// Recovery already ended on this or an earlier ACK.
+		s.applyUndo()
+		return
+	}
+	s.undoPending = true
+	if s.state == tcpip.SACKRecovery {
+		// Non-SACK fast recovery keeps cwnd inflation bookkeeping; only
+		// SACK recovery may resume the prior rate immediately.
+		s.SndCwnd = max(s.SndCwnd, s.undoCwnd)
 	}
 }
 
@@ -1802,7 +1869,7 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 			// If any segment is marked as lost by
 			// RACK, enter recovery and retransmit
 			// the lost segments.
-			s.cc.HandleLossDetected()
+			s.reduceForLoss()
 			s.enterRecovery()
 			fastRetransmit = true
 		}

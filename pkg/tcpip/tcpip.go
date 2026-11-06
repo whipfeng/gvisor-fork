@@ -2278,6 +2278,10 @@ type TCPStats struct {
 	// SpuriousRTORecovery is the number of spurious RTOs.
 	SpuriousRTORecovery *StatCounter
 
+	// SpuriousRecoveryUndo is the number of spurious fast/SACK recoveries
+	// whose congestion window reduction was undone.
+	SpuriousRecoveryUndo *StatCounter
+
 	// ForwardMaxInFlightDrop is the number of connection requests that are
 	// dropped due to exceeding the maximum number of in-flight connection
 	// requests.

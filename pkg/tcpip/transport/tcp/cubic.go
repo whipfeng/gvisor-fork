@@ -63,6 +63,12 @@ type cubicState struct {
 	// RTO.
 	numCongestionEvents int
 
+	undoWLastMax float64             `state:"nosave"`
+	undoWMax     float64             `state:"nosave"`
+	undoK        float64             `state:"nosave"`
+	undoT        tcpip.MonotonicTime `state:"nosave"`
+	undoEvents   int                 `state:"nosave"`
+
 	s *sender
 }
 
@@ -302,6 +308,16 @@ func (c *cubicState) fastConvergence() {
 	}
 	// Recompute k as wMax may have changed.
 	c.K = math.Cbrt(c.WMax * (1 - c.Beta) / c.C)
+}
+
+// saveUndo implements undoer.saveUndo.
+func (c *cubicState) saveUndo() {
+	c.undoWLastMax, c.undoWMax, c.undoK, c.undoT, c.undoEvents = c.WLastMax, c.WMax, c.K, c.T, c.numCongestionEvents
+}
+
+// undo implements undoer.undo.
+func (c *cubicState) undo() {
+	c.WLastMax, c.WMax, c.K, c.T, c.numCongestionEvents = c.undoWLastMax, c.undoWMax, c.undoK, c.undoT, c.undoEvents
 }
 
 // PostRecovery implements congestionControl.PostRecovery.

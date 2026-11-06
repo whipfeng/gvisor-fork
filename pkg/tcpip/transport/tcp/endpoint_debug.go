@@ -43,6 +43,8 @@ type TCPFlowDebugInfo struct {
 	SackedOut     int    `json:"sackedOut"`
 	DupAcks       int    `json:"dupAcks"`
 	SndWnd        uint32 `json:"sndWnd"`
+	UndoValid     bool   `json:"undoValid"`
+	UndoPending   bool   `json:"undoPending"`
 	RTOus         int64  `json:"rtoUs"`
 	SRTTus        int64  `json:"srttUs"`
 	LastSendAgoMs int64  `json:"lastSendAgoMs"`
@@ -54,11 +56,11 @@ type TCPFlowDebugInfo struct {
 	Corked        bool   `json:"corked"`
 	ZeroWndProbe  bool   `json:"zeroWndProbe"`
 
-	HasReceiver     bool   `json:"hasReceiver"`
-	RcvNxt          uint32 `json:"rcvNxt"`
-	RcvAcc          uint32 `json:"rcvAcc"`
-	PendingBufUsed  int    `json:"pendingBufUsed"`
-	PendingRcvSegs  int    `json:"pendingRcvSegs"`
+	HasReceiver    bool   `json:"hasReceiver"`
+	RcvNxt         uint32 `json:"rcvNxt"`
+	RcvAcc         uint32 `json:"rcvAcc"`
+	PendingBufUsed int    `json:"pendingBufUsed"`
+	PendingRcvSegs int    `json:"pendingRcvSegs"`
 }
 
 func timerStateName(t timer) string {
@@ -140,6 +142,8 @@ func DumpTCPFlowDebug(filter func(local, remote tcpip.FullAddress) bool) []TCPFl
 			info.SackedOut = snd.SackedOut
 			info.DupAcks = snd.DupAckCount
 			info.SndWnd = uint32(snd.SndWnd)
+			info.UndoValid = snd.undoValid
+			info.UndoPending = snd.undoPending
 			info.RTOus = snd.RTO.Microseconds()
 			info.SRTTus = snd.rtt.SRTT.Microseconds()
 			if snd.LastSendTime != (tcpip.MonotonicTime{}) {
