@@ -853,10 +853,46 @@ func (e *Endpoint) sendTCP(r *stack.Route, tf tcpFields, pkt *stack.PacketBuffer
 			tf.id.LocalAddress, tf.id.LocalPort, tf.id.RemoteAddress, tf.id.RemotePort,
 			e.EndpointState(), tf.flags, tf.seq, tf.ack, pkt.Data().Size(),
 			r.LocalAddress(), r.NICID(), r.MTU(), err, err)
+		if r == e.route && !r.IsValidForOutgoing() {
+			e.rerouteLocked()
+		}
 		return err
 	}
 	e.stats.SegmentsSent.Increment()
 	return nil
+}
+
+// rerouteLocked re-resolves e.route after its egress NIC became unusable
+// (Phaethon: a mesh link rebuild removes the old Link NIC, and endpoints
+// otherwise keep the dead route for life). The connection 4-tuple is kept.
+//
+// +checklocks:e.mu
+func (e *Endpoint) rerouteLocked() {
+	old := e.route
+	local, remote := e.TransportEndpointInfo.ID.LocalAddress, e.TransportEndpointInfo.ID.RemoteAddress
+	var r *stack.Route
+	var err tcpip.Error
+	if e.RouteFunc != nil {
+		r, err = e.stack.BuildRouteFromDecision(e.RouteFunc(), old.NetProto(), local, remote)
+	} else {
+		// NIC 0: the old NIC no longer exists; the RouteSelector picks egress.
+		r, err = e.stack.FindRoute(0, local, remote, old.NetProto(), false /* multicastLoop */)
+	}
+	if err != nil {
+		util.LogModuleDebug("gvisor", "[TCP-REROUTE] failed: local=%s:%d remote=%s:%d oldNIC=%d err=%v",
+			local, e.TransportEndpointInfo.ID.LocalPort, remote, e.TransportEndpointInfo.ID.RemotePort, old.NICID(), err)
+		return
+	}
+	if !r.IsValidForOutgoing() {
+		r.Release()
+		return
+	}
+	oldNIC := old.NICID()
+	e.route = r
+	old.Release()
+	util.LogModuleInfo("gvisor", "[TCP-REROUTE] local=%s:%d remote=%s:%d state=%s nic %d -> %d",
+		local, e.TransportEndpointInfo.ID.LocalPort, remote, e.TransportEndpointInfo.ID.RemotePort,
+		e.EndpointState(), oldNIC, r.NICID())
 }
 
 func buildTCPHdr(r *stack.Route, tf tcpFields, pkt *stack.PacketBuffer, gso stack.GSO) {

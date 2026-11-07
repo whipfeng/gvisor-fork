@@ -436,7 +436,10 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 			nextSeg = seg
 		}
 
-		if s.ep.SACKPermitted && s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
+		// Phaethon: SackedOut counts segments with seg.acked set (the flag
+		// walkSACK sets when incrementing); the scoreboard is reset on RTO
+		// while seg.acked survives, so keying on it keeps inc/dec symmetric.
+		if seg.acked {
 			// Update sackedOut for new maximum payload size.
 			s.SackedOut -= s.pCount(seg, oldMSS)
 			s.SackedOut += s.pCount(seg, s.MaxPayloadSize)
@@ -716,6 +719,7 @@ func (s *sender) splitSeg(seg *segment, size int) {
 		return
 	}
 	// Split this segment up.
+	prevCount := s.pCount(seg, s.MaxPayloadSize)
 	nSeg := seg.clone()
 	nSeg.pkt.Data().TrimFront(size)
 	nSeg.sequenceNumber.UpdateForward(seqnum.Size(size))
@@ -734,6 +738,13 @@ func (s *sender) splitSeg(seg *segment, size int) {
 		seg.flags ^= header.TCPFlagPsh
 	}
 	seg.pkt.Data().CapLength(size)
+
+	// Phaethon: both halves of a SACKed segment stay SACKed; keep SackedOut
+	// equal to the pCount sum of acked segments.
+	if seg.acked {
+		nSeg.acked = true
+		s.SackedOut += s.pCount(seg, s.MaxPayloadSize) + s.pCount(nSeg, s.MaxPayloadSize) - prevCount
+	}
 }
 
 // NextSeg implements the RFC6675 NextSeg() operation.
@@ -1164,7 +1175,9 @@ func (s *sender) enterRecovery() {
 	// We inflate the cwnd by 3 to account for the 3 packets which triggered
 	// the 3 duplicate ACKs and are now not in flight.
 	s.SndCwnd = s.Ssthresh + 3
-	s.SackedOut = 0
+	// Phaethon: SackedOut is not zeroed here (upstream did): SACKed
+	// segments still in writeList are decremented when cumulatively acked,
+	// which drove the counter negative. Linux keeps sacked_out too.
 	// SetPipe() owns all SACK accounting for the duration of recovery.
 	s.sackedOutsideRecovery = 0
 	s.DupAckCount = 0
@@ -1262,7 +1275,11 @@ func (s *sender) SetPipe() {
 	}
 	pipe := 0
 	smss := seqnum.Size(s.ep.scoreboard.SMSS())
+	afterWriteNext := false
 	for s1 := s.writeList.Front(); s1 != nil && s1.payloadSize() != 0 && s.isAssignedSequenceNumber(s1); s1 = s1.Next() {
+		if s1 == s.writeNext {
+			afterWriteNext = true
+		}
 		// With GSO each segment can be much larger than SMSS. So check the segment
 		// in SMSS sized ranges.
 		segEnd := s1.sequenceNumber.Add(seqnum.Size(s1.payloadSize()))
@@ -1291,7 +1308,10 @@ func (s *sender) SetPipe() {
 			// NOTE: here we mark the whole segment as lost. We do not try
 			// and test every byte in our write buffer as we maintain our
 			// pipe in terms of outstanding packets and not bytes.
-			if !s.ep.scoreboard.IsRangeLost(sb) {
+			// Phaethon: RACK-lost segments, and segments not yet resent
+			// since an RTO rewound writeNext, are not in flight (Linux
+			// excludes lost_out); counting them stalls recovery.
+			if !s1.lost && !afterWriteNext && !s.ep.scoreboard.IsRangeLost(sb) {
 				pipe++
 			}
 			// SetPipe():
@@ -1770,6 +1790,9 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 				seg.TrimFront(ackLeft)
 				seg.sequenceNumber.UpdateForward(ackLeft)
 				s.Outstanding -= prevCount - s.pCount(seg, s.MaxPayloadSize)
+				if seg.acked {
+					s.SackedOut -= prevCount - s.pCount(seg, s.MaxPayloadSize)
+				}
 				break
 			}
 
@@ -1790,10 +1813,12 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 			// already been accounted for in SetPipe() (during loss
 			// recovery) or in sackedOutsideRecovery below (outside
 			// of it).
+			if seg.acked {
+				s.SackedOut -= s.pCount(seg, s.MaxPayloadSize)
+			}
 			if !s.ep.SACKPermitted || !s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
 				s.Outstanding -= s.pCount(seg, s.MaxPayloadSize)
 			} else {
-				s.SackedOut -= s.pCount(seg, s.MaxPayloadSize)
 				// SetPipe() only accounts for SACKed segments
 				// during loss recovery; segments SACKed outside
 				// of it are recorded in sackedOutsideRecovery

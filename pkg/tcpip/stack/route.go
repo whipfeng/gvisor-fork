@@ -515,6 +515,12 @@ func (r *Route) isValidForOutgoing() bool {
 	return r.isValidForOutgoingRLocked()
 }
 
+// IsValidForOutgoing reports whether the route can still send packets
+// (Phaethon: TCP endpoints use it to detect a removed egress NIC).
+func (r *Route) IsValidForOutgoing() bool {
+	return r.isValidForOutgoing()
+}
+
 // +checklocksread:r.mu
 func (r *Route) isValidForOutgoingRLocked() bool {
 	if !r.outgoingNIC.Enabled() {
