@@ -50,6 +50,25 @@ func MakeWithData(b []byte) Buffer {
 	return buf
 }
 
+// MakeWithExternalData creates a Buffer that references data without copying.
+// release is called exactly once when the last reference to the underlying
+// chunk is dropped. The caller must not access or reuse data afterwards;
+// copy-on-write (View.Write on a shared chunk, View.Clone) allocates a pooled
+// chunk instead, so external memory is never mutated in place.
+func MakeWithExternalData(data []byte, release func()) Buffer {
+	buf := Buffer{}
+	if len(data) == 0 {
+		if release != nil {
+			release()
+		}
+		return buf
+	}
+	v := viewPool.Get().(*View)
+	*v = View{chunk: newExternalChunk(data, release), write: len(data)}
+	buf.Append(v)
+	return buf
+}
+
 // MakeWithView creates a new Buffer initialized with given view. This function
 // takes ownership of v.
 func MakeWithView(v *View) Buffer {

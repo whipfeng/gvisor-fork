@@ -76,6 +76,18 @@ func getChunkPool(size int) *sync.Pool {
 type chunk struct {
 	chunkRefs
 	data []byte
+	// externalRelease, when non-nil, marks data as externally owned memory:
+	// DecRef to zero calls it instead of returning the chunk to a pool.
+	// Phaethon uses this to hand the P2P receive pool to gVisor without a copy.
+	externalRelease func()
+}
+
+// newExternalChunk wraps caller-owned memory without copying. release runs
+// exactly once, when the last reference is dropped.
+func newExternalChunk(data []byte, release func()) *chunk {
+	c := &chunk{data: data, externalRelease: release}
+	c.InitRefs()
+	return c
 }
 
 func newChunk(size int) *chunk {
@@ -94,6 +106,13 @@ func newChunk(size int) *chunk {
 }
 
 func (c *chunk) destroy() {
+	if c.externalRelease != nil {
+		release := c.externalRelease
+		c.externalRelease = nil
+		c.data = nil
+		release()
+		return
+	}
 	if len(c.data) > MaxChunkSize {
 		c.data = nil
 		return
