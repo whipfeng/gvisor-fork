@@ -349,19 +349,7 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	snd.rtt.Lock()
 	srtt := snd.rtt.TCPRTTState.SRTT
 	snd.rtt.Unlock()
-	base := time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
-	// Phaethon: on a buffered relay path the queueing delay (SRTT − minRTT)
-	// routinely dwarfs the draft's minRTT/4 settling window (observed 300ms
-	// vs 15ms). Segments delayed by the queue then look RACK-lost and trigger
-	// spurious retransmits (DSACK storms, cwnd churn). Use the observed
-	// queueing delay as a floor so only segments older than the actual
-	// delivery spread are declared lost. The min(_, SRTT) cap still bounds it.
-	if srtt > rc.minRTT {
-		if qd := srtt - rc.minRTT; qd > base {
-			base = qd
-		}
-	}
-	rc.ReoWnd = base
+	rc.ReoWnd = time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
 	if srtt < rc.ReoWnd {
 		rc.ReoWnd = srtt
 	}
