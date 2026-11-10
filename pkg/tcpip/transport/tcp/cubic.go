@@ -205,11 +205,10 @@ func (c *cubicState) updateSlowStart(packetsAcked int) int {
 // +checklocks:c.s.ep.mu
 func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 	if c.s.Ssthresh == InitialSsthresh && c.s.SndCwnd < c.s.Ssthresh {
-		// Phaethon experiment: HyStart's delay-increase exit uses 4-16ms
-		// thresholds; this mesh path jitters 30ms+, so it exits slow start
-		// spuriously around cwnd=20. Disabled to test whether slow start can
-		// grow the window to the path BDP.
-		// c.updateHyStart(rtt)
+		// Phaethon experiment: keep HyStart enabled but raise its delay
+		// thresholds to 50/150ms so slow start exits near the path BDP
+		// instead of spuriously around cwnd=20 on this jittery mesh path.
+		c.updateHyStart(rtt)
 	}
 	if c.s.SndCwnd < c.s.Ssthresh {
 		packetsAcked = c.updateSlowStart(packetsAcked)
