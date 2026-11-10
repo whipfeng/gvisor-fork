@@ -360,8 +360,8 @@ func (rc *rackControl) updateRACKReorderWindow() {
 		}
 	}
 	rc.ReoWnd = base
-	if 2*srtt < rc.ReoWnd {
-		rc.ReoWnd = 2 * srtt
+	if srtt < rc.ReoWnd {
+		rc.ReoWnd = srtt
 	}
 }
 
