@@ -69,6 +69,10 @@ type rackControl struct {
 
 	// updates counts RACK update() calls (diagnostics).
 	updates uint64
+
+	// dsackCount counts DSACK-marked segments reported for this endpoint
+	// (diagnostics; not persisted across save/restore).
+	dsackCount uint64
 }
 
 // init initializes RACK specific fields.

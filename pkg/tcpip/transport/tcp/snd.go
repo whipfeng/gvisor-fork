@@ -1438,6 +1438,7 @@ func (s *sender) walkSACK(rcvdSeg *segment) bool {
 			numDSACK = 1
 		}
 		s.ep.stack.Stats().TCP.SegmentsAckedWithDSACK.IncrementBy(numDSACK)
+		s.rc.dsackCount += numDSACK
 		s.rc.setDSACKSeen(true)
 		idx = 1
 		n--

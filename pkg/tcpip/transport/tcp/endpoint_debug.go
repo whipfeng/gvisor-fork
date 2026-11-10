@@ -65,6 +65,7 @@ type TCPFlowDebugInfo struct {
 	ReoWndIncr uint8 `json:"reoWndIncr"`
 	Reord      bool  `json:"reord"`
 	DSACKSeen  bool  `json:"dsackSeen"`
+	DSACKCount uint64 `json:"dsackCount"`
 	RackUpdates uint64 `json:"rackUpdates"`
 	SACKPermit  bool   `json:"sackPermitted"`
 	RecoveryB   int    `json:"recoveryBits"`
