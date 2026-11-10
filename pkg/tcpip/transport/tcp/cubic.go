@@ -114,21 +114,6 @@ func (c *cubicState) enterCongestionAvoidance() {
 	}
 }
 
-// maxCwndSegments bounds CUBIC's window on the Phaethon mesh path.
-//
-// Phaethon experiment: with HyStart disabled, slow start overshoots far past
-// the path BDP (~500 segments on the vm->jf two-hop path) and starves other
-// flows. 256 segments/flow (~370KB) covers the load-time RTT (~200ms) at
-// ~1.8MB/s per flow while still bounding the aggregate queue.
-const maxCwndSegments = 256
-
-// +checklocks:c.s.ep.mu
-func (c *cubicState) clampCwnd() {
-	if c.s.SndCwnd > maxCwndSegments {
-		c.s.SndCwnd = maxCwndSegments
-	}
-}
-
 // updateHyStart tracks packet round-trip time (rtt) to find a safe threshold
 // to exit slow start without triggering packet loss.  It updates the SSThresh
 // when it does.
@@ -222,15 +207,13 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 	if c.s.Ssthresh == InitialSsthresh && c.s.SndCwnd < c.s.Ssthresh {
 		// Phaethon experiment: HyStart's delay-increase exit uses 4-16ms
 		// thresholds; this mesh path jitters 30ms+, so it exits slow start
-		// spuriously around cwnd=20. Raise-and-retry showed the delay check
-		// still does not fire (per-round min RTT grows gradually), so it is
-		// disabled and the window is bounded by maxCwndSegments instead.
+		// spuriously around cwnd=20. Disabled to test whether slow start can
+		// grow the window to the path BDP.
 		// c.updateHyStart(rtt)
 	}
 	if c.s.SndCwnd < c.s.Ssthresh {
 		packetsAcked = c.updateSlowStart(packetsAcked)
 		if packetsAcked == 0 {
-			c.clampCwnd()
 			return
 		}
 	} else {
@@ -239,7 +222,6 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 		c.s.rtt.Unlock()
 		c.s.SndCwnd = max(c.getCwnd(packetsAcked, c.s.SndCwnd, srtt), 1)
 	}
-	c.clampCwnd()
 }
 
 // cubicCwnd computes the CUBIC congestion window after t seconds from last

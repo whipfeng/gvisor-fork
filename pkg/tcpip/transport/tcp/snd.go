@@ -1136,16 +1136,9 @@ func (s *sender) sendData() {
 	}
 
 	var dataSent bool
-	// Phaethon experiment: bound in-flight segments even while recovery
-	// inflates SndCwnd, so a single flow cannot fill the relay/UDP-leg
-	// queues on this high-RTT mesh path.
-	cwnd := s.SndCwnd
-	if cwnd > maxCwndSegments {
-		cwnd = maxCwndSegments
-	}
-	for seg := s.writeNext; seg != nil && s.Outstanding < cwnd; seg = seg.Next() {
+	for seg := s.writeNext; seg != nil && s.Outstanding < s.SndCwnd; seg = seg.Next() {
 		// NOTE(gvisor.dev/issue/11632): Use uint64 to avoid overflow.
-		cwndLimit := uint64(cwnd-s.Outstanding) * uint64(s.MaxPayloadSize)
+		cwndLimit := uint64(s.SndCwnd-s.Outstanding) * uint64(s.MaxPayloadSize)
 		if cwndLimit < uint64(limit) {
 			limit = int(cwndLimit)
 		}
