@@ -66,6 +66,9 @@ type rackControl struct {
 
 	// snd is a reference to the sender.
 	snd *sender
+
+	// updates counts RACK update() calls (diagnostics).
+	updates uint64
 }
 
 // init initializes RACK specific fields.

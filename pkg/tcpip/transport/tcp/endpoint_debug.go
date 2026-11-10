@@ -62,9 +62,12 @@ type TCPFlowDebugInfo struct {
 	ReoWndMs   int64 `json:"reoWndMs"`
 	MinRTTus   int64 `json:"minRttUs"`
 	RackRTTus  int64 `json:"rackRttUs"`
-	ReoWndIncr int   `json:"reoWndIncr"`
+	ReoWndIncr uint8 `json:"reoWndIncr"`
 	Reord      bool  `json:"reord"`
 	DSACKSeen  bool  `json:"dsackSeen"`
+	RackUpdates uint64 `json:"rackUpdates"`
+	SACKPermit  bool   `json:"sackPermitted"`
+	RecoveryB   int    `json:"recoveryBits"`
 
 	HasReceiver    bool   `json:"hasReceiver"`
 	RcvNxt         uint32 `json:"rcvNxt"`
@@ -164,6 +167,15 @@ func DumpTCPFlowDebug(filter func(local, remote tcpip.FullAddress) bool) []TCPFl
 			info.ProbeTimer = timerStateName(snd.probeTimer)
 			info.Corked = snd.startCork
 			info.ZeroWndProbe = snd.zeroWindowProbing
+			info.ReoWndMs = snd.rc.ReoWnd.Milliseconds()
+			info.MinRTTus = snd.rc.minRTT.Microseconds()
+			info.RackRTTus = snd.rc.RTT.Microseconds()
+			info.ReoWndIncr = snd.rc.ReoWndIncr
+			info.Reord = snd.rc.Reord
+			info.DSACKSeen = snd.rc.DSACKSeen
+			info.RackUpdates = snd.rc.updates
+			info.SACKPermit = e.SACKPermitted
+			info.RecoveryB = int(e.tcpRecovery)
 			for seg := snd.writeNext; seg != nil; seg = seg.Next() {
 				info.UnsentBytes += seg.payloadSize()
 				info.WriteListSegs++
