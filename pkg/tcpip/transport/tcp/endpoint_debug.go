@@ -174,6 +174,7 @@ func DumpTCPFlowDebug(filter func(local, remote tcpip.FullAddress) bool) []TCPFl
 			info.ReoWndIncr = snd.rc.ReoWndIncr
 			info.Reord = snd.rc.Reord
 			info.DSACKSeen = snd.rc.DSACKSeen
+			info.DSACKCount = snd.rc.dsackCount
 			info.RackUpdates = snd.rc.updates
 			info.SACKPermit = e.SACKPermitted
 			info.RecoveryB = int(e.tcpRecovery)
