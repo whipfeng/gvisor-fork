@@ -349,7 +349,17 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	snd.rtt.Lock()
 	srtt := snd.rtt.TCPRTTState.SRTT
 	snd.rtt.Unlock()
-	rc.ReoWnd = time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
+	base := time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
+	// Single-layer ht experiment: on this carrier the ACK delay jitters with
+	// the HTTP request cycle, so RACK may mark merely-delayed segments lost
+	// (DSACK ~8.5% with no real loss). Use the observed queueing delay as a
+	// floor; still capped at SRTT.
+	if srtt > rc.minRTT {
+		if qd := srtt - rc.minRTT; qd > base {
+			base = qd
+		}
+	}
+	rc.ReoWnd = base
 	if srtt < rc.ReoWnd {
 		rc.ReoWnd = srtt
 	}
