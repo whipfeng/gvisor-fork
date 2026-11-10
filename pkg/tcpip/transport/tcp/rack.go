@@ -350,10 +350,15 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	srtt := snd.rtt.TCPRTTState.SRTT
 	snd.rtt.Unlock()
 	base := time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
-	// Phaethon experiment: the ht batch pipeline can delay a segment by more
-	// than one SRTT relative to later-sent segments. Use 4x SRTT as the RACK
-	// reordering allowance; duplicate-ACK/SACK recovery still handles real loss.
-	base = 4 * srtt
+	// Single-layer ht experiment: on this carrier the ACK delay jitters with
+	// the HTTP request cycle, so RACK may mark merely-delayed segments lost
+	// (DSACK ~8.5% with no real loss). Use the observed queueing delay as a
+	// floor; still capped at SRTT.
+	if srtt > rc.minRTT {
+		if qd := srtt - rc.minRTT; qd > base {
+			base = qd
+		}
+	}
 	rc.ReoWnd = base
 	if srtt < rc.ReoWnd {
 		rc.ReoWnd = srtt
