@@ -56,6 +56,16 @@ type TCPFlowDebugInfo struct {
 	Corked        bool   `json:"corked"`
 	ZeroWndProbe  bool   `json:"zeroWndProbe"`
 
+	// RACK reordering diagnostics: ReoWnd is the allowance before RACK marks
+	// a segment lost; MinRTT/ReoWndIncr drive it. Reord sticky means a state
+	// where dup-ACK fast retransmit is intentionally disabled.
+	ReoWndMs   int64 `json:"reoWndMs"`
+	MinRTTus   int64 `json:"minRttUs"`
+	RackRTTus  int64 `json:"rackRttUs"`
+	ReoWndIncr int   `json:"reoWndIncr"`
+	Reord      bool  `json:"reord"`
+	DSACKSeen  bool  `json:"dsackSeen"`
+
 	HasReceiver    bool   `json:"hasReceiver"`
 	RcvNxt         uint32 `json:"rcvNxt"`
 	RcvAcc         uint32 `json:"rcvAcc"`
