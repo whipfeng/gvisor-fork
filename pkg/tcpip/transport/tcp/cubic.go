@@ -114,6 +114,18 @@ func (c *cubicState) enterCongestionAvoidance() {
 	}
 }
 
+// maxCwndSegments bounds CUBIC's in-flight window on the Phaethon mesh path.
+// With HyStart disabled, slow start overshoots far past the path BDP and the
+// resulting queue loss shows up as heavy DSACK/spurious retransmission.
+const maxCwndSegments = 256
+
+// +checklocks:c.s.ep.mu
+func (c *cubicState) clampCwnd() {
+	if c.s.SndCwnd > maxCwndSegments {
+		c.s.SndCwnd = maxCwndSegments
+	}
+}
+
 // updateHyStart tracks packet round-trip time (rtt) to find a safe threshold
 // to exit slow start without triggering packet loss.  It updates the SSThresh
 // when it does.
@@ -214,6 +226,7 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 	if c.s.SndCwnd < c.s.Ssthresh {
 		packetsAcked = c.updateSlowStart(packetsAcked)
 		if packetsAcked == 0 {
+			c.clampCwnd()
 			return
 		}
 	} else {
@@ -222,6 +235,7 @@ func (c *cubicState) Update(packetsAcked int, rtt time.Duration) {
 		c.s.rtt.Unlock()
 		c.s.SndCwnd = max(c.getCwnd(packetsAcked, c.s.SndCwnd, srtt), 1)
 	}
+	c.clampCwnd()
 }
 
 // cubicCwnd computes the CUBIC congestion window after t seconds from last

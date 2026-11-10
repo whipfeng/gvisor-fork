@@ -1136,9 +1136,15 @@ func (s *sender) sendData() {
 	}
 
 	var dataSent bool
-	for seg := s.writeNext; seg != nil && s.Outstanding < s.SndCwnd; seg = seg.Next() {
+	// Phaethon experiment: bound in-flight segments even while recovery
+	// inflates SndCwnd, so one flow cannot fill the ht/relay queues.
+	cwnd := s.SndCwnd
+	if cwnd > maxCwndSegments {
+		cwnd = maxCwndSegments
+	}
+	for seg := s.writeNext; seg != nil && s.Outstanding < cwnd; seg = seg.Next() {
 		// NOTE(gvisor.dev/issue/11632): Use uint64 to avoid overflow.
-		cwndLimit := uint64(s.SndCwnd-s.Outstanding) * uint64(s.MaxPayloadSize)
+		cwndLimit := uint64(cwnd-s.Outstanding) * uint64(s.MaxPayloadSize)
 		if cwndLimit < uint64(limit) {
 			limit = int(cwndLimit)
 		}
