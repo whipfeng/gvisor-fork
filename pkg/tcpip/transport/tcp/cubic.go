@@ -118,9 +118,9 @@ func (c *cubicState) enterCongestionAvoidance() {
 //
 // Phaethon experiment: with HyStart disabled, slow start overshoots far past
 // the path BDP (~500 segments on the vm->jf two-hop path) and starves other
-// flows. 64 segments/flow (~92KB) still supports >1.5MB/s per flow at the
-// 55ms path minRTT, while keeping 8 flows under the aggregate BDP.
-const maxCwndSegments = 64
+// flows. 256 segments/flow (~370KB) covers the load-time RTT (~200ms) at
+// ~1.8MB/s per flow while still bounding the aggregate queue.
+const maxCwndSegments = 256
 
 // +checklocks:c.s.ep.mu
 func (c *cubicState) clampCwnd() {
