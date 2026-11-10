@@ -34,8 +34,8 @@ const (
 	// maxRTTThresh. Smaller values of minRTTThresh may cause spurious exits
 	// from slow start. Larger values of maxRTTThresh may result in slow start
 	// not exiting until loss is encountered for connections on large RTT paths.
-	minRTTThresh = 4 * time.Millisecond
-	maxRTTThresh = 16 * time.Millisecond
+	minRTTThresh = 20 * time.Millisecond
+	maxRTTThresh = 60 * time.Millisecond
 
 	// minRTTDivisor is a fraction of RTT to compute the delay threshold. A
 	// smaller value would mean a larger threshold and thus less sensitivity to
