@@ -357,10 +357,7 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	// queueing delay as a floor so only segments older than the actual
 	// delivery spread are declared lost. The min(_, SRTT) cap still bounds it.
 	if srtt > rc.minRTT {
-		// Use a quarter of the observed queueing delay as the floor: enough
-		// to absorb scheduling jitter, small enough that a genuinely lost
-		// segment is still retransmitted well before an RTO.
-		if qd := (srtt - rc.minRTT) / 4; qd > base {
+		if qd := srtt - rc.minRTT; qd > base {
 			base = qd
 		}
 	}
