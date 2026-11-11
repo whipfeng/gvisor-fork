@@ -307,11 +307,10 @@ func (c *cubicState) HandleRTOExpired() {
 	// We lost a packet, so reduce ssthresh.
 	c.reduceSlowStartThreshold()
 
-	// Phaethon: on a 300ms delay spike the pre-armed RTO fires on every
-	// flow; RFC's cwnd=1 then freezes the whole tunnel for tens of seconds.
-	// Keep a small floor (4 segments) so recovery after the spike is not
-	// serialized at one segment per RTO.
-	c.s.SndCwnd = 4
+	// Reduce the congestion window to 1, i.e., enter slow-start. Per
+	// RFC 5681, page 7, we must use 1 regardless of the value of the
+	// initial congestion window.
+	c.s.SndCwnd = 1
 }
 
 // fastConvergence implements the logic for Fast Convergence algorithm as
