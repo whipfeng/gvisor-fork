@@ -1618,26 +1618,28 @@ func (s *sender) detectSpuriousRecovery(hasDSACK bool, tsEchoReply uint32) {
 	// If the value of the Timestamp Echo Reply field of the acceptable ACK's
 	// Timestamps option is smaller than the value of RetransmitTS, then
 	// proceed to next step, else return.
-	if tsEchoReply >= s.retransmitTS {
-		return
-	}
-
-	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 5
 	//
-	// If the acceptable ACK carries a DSACK option [RFC2883], then return.
-	if hasDSACK {
-		return
-	}
+	// Phaethon: a DSACK block is direct evidence that a retransmission was
+	// spurious (RFC 3708), so it does not need the timestamp test. RFC 3522
+	// step 5 tells this timestamp detector to ignore DSACK ACKs because the
+	// DSACK itself proves spuriousness. Without handling it here, recovery
+	// entered by RACK on a reordering/delay spike stays in SACK recovery with
+	// cwnd collapsed even though the "lost" segments were actually delivered.
+	if !hasDSACK {
+		if tsEchoReply >= s.retransmitTS {
+			return
+		}
 
-	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 5
-	//
-	// If during the lifetime of the TCP connection the TCP sender has
-	// previously received an ACK with a DSACK option, or the acceptable ACK
-	// does not acknowledge all outstanding data, then proceed to next step,
-	// else return.
-	numDSACK := s.ep.stack.Stats().TCP.SegmentsAckedWithDSACK.Value()
-	if numDSACK == 0 && s.SndUna == s.SndNxt {
-		return
+		// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 5
+		//
+		// If during the lifetime of the TCP connection the TCP sender has
+		// previously received an ACK with a DSACK option, or the acceptable ACK
+		// does not acknowledge all outstanding data, then proceed to next step,
+		// else return.
+		numDSACK := s.ep.stack.Stats().TCP.SegmentsAckedWithDSACK.Value()
+		if numDSACK == 0 && s.SndUna == s.SndNxt {
+			return
+		}
 	}
 
 	// See: https://datatracker.ietf.org/doc/html/rfc3522#section-3.2 Step 6
