@@ -1224,24 +1224,6 @@ func (s *sender) adaptiveMaxCwnd() int {
 	return capSegs
 }
 
-// rtoWithJitter adds a deterministic per-flow offset (0..25% of RTO) when
-// arming the retransmit timer. A 300ms path delay spike can make every flow
-// RTO at once; without jitter their retransmissions and backoff stay in
-// lockstep and the whole tunnel freezes at cwnd=1 for tens of seconds.
-func (s *sender) rtoWithJitter() time.Duration {
-	rto := s.RTO
-	if rto <= 0 {
-		return rto
-	}
-	span := int64(rto / 4)
-	if span <= 0 {
-		return rto
-	}
-	id := s.ep.TransportEndpointInfo.ID
-	seed := uint64(id.RemotePort)*2654435761 + uint64(id.LocalPort)
-	return rto + time.Duration(seed%uint64(span))
-}
-
 // +checklocks:s.ep.mu
 func (s *sender) enterRecovery() {
 	// Initialize the variables used to detect spurious recovery after
