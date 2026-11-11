@@ -30,11 +30,7 @@ import (
 
 const (
 	// MinRTO is the minimum allowed value for the retransmit timeout.
-	// Phaethon: raised from 200ms to 1s. The two-hop mesh path sees 300ms+
-	// delay spikes; with a 200ms floor every flow RTOs simultaneously and
-	// collapses to cwnd=1 for tens of seconds. 1s leaves loss detection to
-	// RACK/SACK dup-ACKs during such spikes.
-	MinRTO = 1 * time.Second
+	MinRTO = 200 * time.Millisecond
 
 	// MaxRTO is the maximum allowed value for the retransmit timeout.
 	MaxRTO = 120 * time.Second
