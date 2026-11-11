@@ -157,11 +157,11 @@ type sender struct {
 	// gso is set if generic segmentation offload is enabled.
 	gso bool
 
-	// Phaethon adaptive in-flight cap: EWMA of delivered bytes/s and the
-	// timestamp of the previous ACK sample. Not persisted.
-	delivRate      float64             `state:"nosave"`
-	lastRateSample tcpip.MonotonicTime `state:"nosave"`
-	lastRateValid  bool                `state:"nosave"`
+	// Phaethon adaptive in-flight cap: windowed delivery-rate EWMA.
+	delivRate   float64             `state:"nosave"`
+	rateBytes   int64               `state:"nosave"`
+	rateStart   tcpip.MonotonicTime `state:"nosave"`
+	rateStarted bool                `state:"nosave"`
 
 	// state is the current state of congestion control for this endpoint.
 	state tcpip.CongestionControlState
