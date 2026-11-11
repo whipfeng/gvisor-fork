@@ -33,7 +33,10 @@ const (
 	MinRTO = 200 * time.Millisecond
 
 	// MaxRTO is the maximum allowed value for the retransmit timeout.
-	MaxRTO = 120 * time.Second
+	// Phaethon: capped from 120s to 16s. After a 300ms delay spike every
+	// flow can RTO and back off for tens of seconds; a 16s ceiling bounds
+	// the post-spike wait without the retransmit storm a 4s cap caused.
+	MaxRTO = 16 * time.Second
 
 	// MinSRTT is the minimum allowed value for smoothed RTT.
 	MinSRTT = 1 * time.Millisecond
