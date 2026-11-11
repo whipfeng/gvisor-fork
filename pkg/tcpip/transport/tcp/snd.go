@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -162,6 +163,11 @@ type sender struct {
 	rateBytes   int64               `state:"nosave"`
 	rateStart   tcpip.MonotonicTime `state:"nosave"`
 	rateStarted bool                `state:"nosave"`
+
+	// Phaethon loss-aware BDP gain: an RTO means the path could not absorb the
+	// large window (delay spike or real loss), so this flow permanently falls
+	// back to the conservative 4x gain. Clean flows keep 16x.
+	bdpGain float64 `state:"nosave"` // 0 = unset, use cwndBDPGain
 
 	// state is the current state of congestion control for this endpoint.
 	state tcpip.CongestionControlState
@@ -653,6 +659,7 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 	s.recordRetransmitTS()
 
 	s.state = tcpip.RTORecovery
+	s.bdpGain = 4 // RTO: this path cannot absorb the large window; be conservative
 	s.cc.HandleRTOExpired()
 
 	// Mark the next segment to be sent as the first unacknowledged one and
@@ -1174,8 +1181,27 @@ func (s *sender) sendData() {
 const (
 	cwndCapFloorSegs = 128
 	cwndCapCeilSegs  = 512
-	cwndBDPGain      = 16
+	// cwndBDPGainDefault is the conservative gain used unless the embedding
+	// application raises it via SetCwndBDPGain (clean, low-reorder carriers
+	// such as the direct UDP leg can absorb 16x; lossy/reordering carriers
+	// regress at 16x, so 4 is the safe default).
+	cwndBDPGainDefault = 4
 )
+
+// cwndBDPGain is the process-wide adaptive BDP gain (see adaptiveMaxCwnd).
+var cwndBDPGain atomic.Uint64
+
+func init() { cwndBDPGain.Store(cwndBDPGainDefault) }
+
+// SetCwndBDPGain overrides the adaptive window's BDP multiplier globally.
+// v == 0 resets to the conservative default. It is intended to be called once
+// at process start from the embedding application's configuration.
+func SetCwndBDPGain(v uint64) {
+	if v == 0 {
+		v = cwndBDPGainDefault
+	}
+	cwndBDPGain.Store(v)
+}
 
 // sampleDelivery folds ACKed bytes into a windowed delivery-rate EWMA. The
 // window (>=100ms) avoids the huge instantaneous rates a per-ACK dt produces
@@ -1212,7 +1238,11 @@ func (s *sender) adaptiveMaxCwnd() int {
 	if s.MaxPayloadSize > 0 && s.delivRate > 0 {
 		if minRTT := s.rc.minRTT; minRTT > 0 {
 			bdpSegs := s.delivRate * minRTT.Seconds() / float64(s.MaxPayloadSize)
-			capSegs = int(cwndBDPGain * bdpSegs)
+			gain := float64(cwndBDPGain.Load())
+			if s.bdpGain > 0 {
+				gain = s.bdpGain
+			}
+			capSegs = int(gain * bdpSegs)
 		}
 	}
 	if capSegs < cwndCapFloorSegs {
