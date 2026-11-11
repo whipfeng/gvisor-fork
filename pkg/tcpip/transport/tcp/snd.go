@@ -1174,7 +1174,7 @@ func (s *sender) sendData() {
 const (
 	cwndCapFloorSegs = 128
 	cwndCapCeilSegs  = 512
-	cwndBDPGain      = 4
+	cwndBDPGain      = 2
 )
 
 // sampleDelivery folds ACKed bytes into a windowed delivery-rate EWMA. The
