@@ -355,14 +355,22 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	snd.rtt.Unlock()
 	base := time.Duration((int64(rc.minRTT) / 4) * int64(rc.ReoWndIncr))
 	// Phaethon: use the observed queueing delay as a reordering floor, but
-	// bound it (100ms). An unbounded srtt-minRTT floor creates a feedback
-	// loop under load: delayed ACKs inflate srtt -> reo_wnd grows to seconds
-	// -> loss recovery stalls for minutes (observed as the two-hop RTO
-	// livelock). 100ms still absorbs the ht batching jitter.
+	// bound it by a multiple of minRTT (stable) rather than srtt (which is
+	// itself inflated by the delay). An unbounded srtt-minRTT floor creates
+	// a feedback loop: delayed ACKs inflate srtt -> reo_wnd grows to seconds
+	// -> loss recovery stalls for minutes. 2*minRTT clamped to [50,150]ms
+	// keeps enough tolerance for ht batching without the spiral.
 	if srtt > rc.minRTT {
+		floorCap := 2 * rc.minRTT
+		if floorCap < 50*time.Millisecond {
+			floorCap = 50 * time.Millisecond
+		}
+		if floorCap > 150*time.Millisecond {
+			floorCap = 150 * time.Millisecond
+		}
 		qd := srtt - rc.minRTT
-		if qd > 100*time.Millisecond {
-			qd = 100 * time.Millisecond
+		if qd > floorCap {
+			qd = floorCap
 		}
 		if qd > base {
 			base = qd

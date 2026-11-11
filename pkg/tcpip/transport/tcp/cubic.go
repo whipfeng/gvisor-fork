@@ -114,15 +114,13 @@ func (c *cubicState) enterCongestionAvoidance() {
 	}
 }
 
-// maxCwndSegments bounds CUBIC's in-flight window on the Phaethon mesh path.
-// With HyStart disabled, slow start overshoots far past the path BDP and the
-// resulting queue loss shows up as heavy DSACK/spurious retransmission.
-const maxCwndSegments = 128
-
+// clampCwnd bounds the window using the sender's delivery-rate/BDP adaptive
+// limit (see sender.adaptiveMaxCwnd).
+//
 // +checklocks:c.s.ep.mu
 func (c *cubicState) clampCwnd() {
-	if c.s.SndCwnd > maxCwndSegments {
-		c.s.SndCwnd = maxCwndSegments
+	if lim := c.s.adaptiveMaxCwnd(); c.s.SndCwnd > lim {
+		c.s.SndCwnd = lim
 	}
 }
 

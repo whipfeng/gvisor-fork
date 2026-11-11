@@ -157,6 +157,12 @@ type sender struct {
 	// gso is set if generic segmentation offload is enabled.
 	gso bool
 
+	// Phaethon adaptive in-flight cap: EWMA of delivered bytes/s and the
+	// timestamp of the previous ACK sample. Not persisted.
+	delivRate      float64             `state:"nosave"`
+	lastRateSample tcpip.MonotonicTime `state:"nosave"`
+	lastRateValid  bool                `state:"nosave"`
+
 	// state is the current state of congestion control for this endpoint.
 	state tcpip.CongestionControlState
 
@@ -1136,11 +1142,11 @@ func (s *sender) sendData() {
 	}
 
 	var dataSent bool
-	// Phaethon experiment: bound in-flight segments even while recovery
-	// inflates SndCwnd, so one flow cannot fill the ht/relay queues.
+	// Phaethon: bound in-flight segments even while recovery inflates
+	// SndCwnd, using the delivery-rate/BDP adaptive cap.
 	cwnd := s.SndCwnd
-	if cwnd > maxCwndSegments {
-		cwnd = maxCwndSegments
+	if lim := s.adaptiveMaxCwnd(); cwnd > lim {
+		cwnd = lim
 	}
 	for seg := s.writeNext; seg != nil && s.Outstanding < cwnd; seg = seg.Next() {
 		// NOTE(gvisor.dev/issue/11632): Use uint64 to avoid overflow.
@@ -1163,6 +1169,57 @@ func (s *sender) sendData() {
 	}
 
 	s.postXmit(dataSent, true /* shouldScheduleProbe */)
+}
+
+const (
+	cwndCapFloorSegs = 128
+	cwndCapCeilSegs  = 512
+	cwndBDPGain      = 4
+)
+
+// sampleDelivery folds one ACK batch into the delivery-rate EWMA used by the
+// adaptive in-flight cap.
+func (s *sender) sampleDelivery(ackedSegs int) {
+	if ackedSegs <= 0 || s.MaxPayloadSize <= 0 {
+		return
+	}
+	now := s.ep.stack.Clock().NowMonotonic()
+	if !s.lastRateValid {
+		s.lastRateSample = now
+		s.lastRateValid = true
+		return
+	}
+	dt := now.Sub(s.lastRateSample)
+	s.lastRateSample = now
+	if dt <= 0 || dt > time.Second {
+		return
+	}
+	inst := float64(ackedSegs*s.MaxPayloadSize) / dt.Seconds()
+	if s.delivRate == 0 {
+		s.delivRate = inst
+	} else {
+		s.delivRate = 0.875*s.delivRate + 0.125*inst
+	}
+}
+
+// adaptiveMaxCwnd bounds in-flight segments by 4x the BDP estimated from the
+// delivery-rate EWMA and RACK minRTT. A single fast flow can use a much larger
+// window than the old fixed 128; with many flows it converges near 128.
+func (s *sender) adaptiveMaxCwnd() int {
+	capSegs := cwndCapFloorSegs
+	if s.MaxPayloadSize > 0 && s.delivRate > 0 {
+		if minRTT := s.rc.minRTT; minRTT > 0 {
+			bdpSegs := s.delivRate * minRTT.Seconds() / float64(s.MaxPayloadSize)
+			capSegs = int(cwndBDPGain * bdpSegs)
+		}
+	}
+	if capSegs < cwndCapFloorSegs {
+		capSegs = cwndCapFloorSegs
+	}
+	if capSegs > cwndCapCeilSegs {
+		capSegs = cwndCapCeilSegs
+	}
+	return capSegs
 }
 
 // +checklocks:s.ep.mu
@@ -1850,6 +1907,7 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 		// If we are not in fast recovery then update the congestion
 		// window based on the number of acknowledged packets.
 		if !s.FastRecovery.Active {
+			s.sampleDelivery(originalOutstanding - s.Outstanding)
 			s.cc.Update(originalOutstanding-s.Outstanding, bestRTT)
 			if s.FastRecovery.Last.LessThan(s.SndUna) {
 				s.state = tcpip.Open
