@@ -30,7 +30,10 @@ import (
 
 const (
 	// MinRTO is the minimum allowed value for the retransmit timeout.
-	MinRTO = 200 * time.Millisecond
+	// Phaethon: raised from 200ms to 2s. The two-hop mesh path sees
+	// ~600ms RTT under a 300ms delay spike; a 1s floor still lets the
+	// pre-armed RTO fire on every flow at once and collapse to cwnd=1.
+	MinRTO = 2 * time.Second
 
 	// MaxRTO is the maximum allowed value for the retransmit timeout.
 	MaxRTO = 120 * time.Second
