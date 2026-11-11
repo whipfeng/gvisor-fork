@@ -1177,29 +1177,31 @@ const (
 	cwndBDPGain      = 4
 )
 
-// sampleDelivery folds one ACK batch into the delivery-rate EWMA used by the
-// adaptive in-flight cap.
+// sampleDelivery folds ACKed bytes into a windowed delivery-rate EWMA. The
+// window (>=100ms) avoids the huge instantaneous rates a per-ACK dt produces
+// when ACKs arrive in bursts.
 func (s *sender) sampleDelivery(ackedSegs int) {
 	if ackedSegs <= 0 || s.MaxPayloadSize <= 0 {
 		return
 	}
 	now := s.ep.stack.Clock().NowMonotonic()
-	if !s.lastRateValid {
-		s.lastRateSample = now
-		s.lastRateValid = true
+	if !s.rateStarted {
+		s.rateStart = now
+		s.rateStarted = true
+	}
+	s.rateBytes += int64(ackedSegs * s.MaxPayloadSize)
+	elapsed := now.Sub(s.rateStart)
+	if elapsed < 100*time.Millisecond {
 		return
 	}
-	dt := now.Sub(s.lastRateSample)
-	s.lastRateSample = now
-	if dt <= 0 || dt > time.Second {
-		return
-	}
-	inst := float64(ackedSegs*s.MaxPayloadSize) / dt.Seconds()
+	inst := float64(s.rateBytes) / elapsed.Seconds()
 	if s.delivRate == 0 {
 		s.delivRate = inst
 	} else {
-		s.delivRate = 0.875*s.delivRate + 0.125*inst
+		s.delivRate = 0.75*s.delivRate + 0.25*inst
 	}
+	s.rateBytes = 0
+	s.rateStart = now
 }
 
 // adaptiveMaxCwnd bounds in-flight segments by 4x the BDP estimated from the
