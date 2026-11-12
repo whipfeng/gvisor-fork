@@ -15,11 +15,26 @@
 package tcp
 
 import (
+	"os"
+	"strconv"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
 )
+
+// reoDSACKBoost is an experimental DSACK-triggered RACK reorder-window boost
+// (0 = off). When a DSACK proves a retransmit was spurious, the window is
+// temporarily widened (up to this duration) so the ongoing queueing delay is
+// tolerated as reordering instead of marking more segments lost.
+var reoDSACKBoost = func() time.Duration {
+	if s := os.Getenv("PHAETHON_REO_DSACK_BOOST_MS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 0
+}()
 
 const (
 	// wcDelayedACKTimeout is the recommended maximum delayed ACK timer
@@ -73,6 +88,9 @@ type rackControl struct {
 	// dsackCount counts DSACK-marked segments reported for this endpoint
 	// (diagnostics; not persisted across save/restore).
 	dsackCount uint64
+
+	// reoWndBoostUntil is the end of a DSACK-triggered reorder-window boost.
+	reoWndBoostUntil tcpip.MonotonicTime
 }
 
 // init initializes RACK specific fields.
@@ -296,6 +314,7 @@ func (s *sender) detectTLPRecovery(ack seqnum.Value, rcvdSeg *segment) {
 func (rc *rackControl) updateRACKReorderWindow() {
 	dsackSeen := rc.DSACKSeen
 	snd := rc.snd
+	now := snd.ep.stack.Clock().NowMonotonic()
 
 	// React to DSACK once per round trip.
 	// If SND.UNA < RACK.rtt_seq:
@@ -314,6 +333,9 @@ func (rc *rackControl) updateRACKReorderWindow() {
 		dsackSeen = false
 		rc.RTTSeq = snd.SndNxt
 		rc.ReoWndPersist = tcpRACKRecoveryThreshold
+		if reoDSACKBoost > 0 {
+			rc.reoWndBoostUntil = now.Add(reoDSACKBoost)
+		}
 	} else if rc.exitedRecovery {
 		// Else if exiting loss recovery:
 		//   RACK.reo_wnd_persist -= 1
@@ -335,7 +357,8 @@ func (rc *rackControl) updateRACKReorderWindow() {
 	//   Else if RACK.pkts_sacked >= RACK.dupthresh:
 	//     RACK.reo_wnd = 0
 	//     return
-	if !rc.Reord {
+	boost := reoDSACKBoost > 0 && now.Before(rc.reoWndBoostUntil)
+	if !rc.Reord && !boost {
 		if snd.state == tcpip.RTORecovery || snd.state == tcpip.SACKRecovery {
 			rc.ReoWnd = 0
 			return
@@ -367,6 +390,18 @@ func (rc *rackControl) updateRACKReorderWindow() {
 		}
 		if floorCap > 150*time.Millisecond {
 			floorCap = 150 * time.Millisecond
+		}
+		if boost {
+			// DSACK proved the last loss mark spurious: tolerate the current
+			// queueing delay (up to the boost duration) instead of marking
+			// more segments lost and feeding the retransmit storm.
+			boostCap := srtt - rc.minRTT
+			if boostCap > reoDSACKBoost {
+				boostCap = reoDSACKBoost
+			}
+			if boostCap > floorCap {
+				floorCap = boostCap
+			}
 		}
 		qd := srtt - rc.minRTT
 		if qd > floorCap {
