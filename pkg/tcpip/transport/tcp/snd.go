@@ -152,6 +152,11 @@ type sender struct {
 	// maxRTO is the maximum permitted value for sender.rto.
 	maxRTO time.Duration
 
+	// rtoBackoffCap caps sender.rto after the RTO estimator and after every
+	// exponential backoff step, without changing the connection give-up
+	// ceiling (maxRTO). Zero means RFC behavior.
+	rtoBackoffCap time.Duration
+
 	// maxRetries is the maximum permitted retransmissions.
 	maxRetries uint32
 
@@ -355,6 +360,12 @@ func newSenderHelper(ep *Endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, ms
 	}
 	s.maxRTO = time.Duration(maxRTO)
 
+	var rtoBackoffCap tcpip.TCPRTOBackoffCapOption
+	if err := ep.stack.TransportProtocolOption(ProtocolNumber, &rtoBackoffCap); err != nil {
+		panic(fmt.Sprintf("unable to get rtoBackoffCap from stack: %s", err))
+	}
+	s.rtoBackoffCap = time.Duration(rtoBackoffCap)
+
 	var maxRetries tcpip.TCPMaxRetriesOption
 	if err := ep.stack.TransportProtocolOption(ProtocolNumber, &maxRetries); err != nil {
 		panic(fmt.Sprintf("unable to get maxRetries from stack: %s", err))
@@ -531,6 +542,18 @@ func (s *sender) updateRTO(rtt time.Duration) {
 	if s.RTO > s.maxRTO {
 		s.RTO = s.maxRTO
 	}
+	s.RTO = capRTOBackoff(s.RTO, s.rtoBackoffCap)
+}
+
+// capRTOBackoff applies the optional overlay RTO cap. A non-positive cap keeps
+// the RFC behavior. It is deliberately separate from maxRTO: maxRTO also
+// bounds the connection give-up ceiling, while this only shortens the
+// retransmission interval.
+func capRTOBackoff(rto, cap time.Duration) time.Duration {
+	if cap > 0 && rto > cap {
+		return cap
+	}
+	return rto
 }
 
 // resendSegment resends the first unacknowledged segment.
@@ -633,6 +656,11 @@ func (s *sender) retransmitTimerExpired() tcpip.Error {
 	if s.RTO > s.maxRTO {
 		s.RTO = s.maxRTO
 	}
+	// Optional overlay backoff cap: bound recovery time on a lossy carrier.
+	// The give-up ceiling above (remaining := s.maxRTO) is intentionally left
+	// untouched, so a capped RTO retransmits more often but does not tear the
+	// connection down any earlier.
+	s.RTO = capRTOBackoff(s.RTO, s.rtoBackoffCap)
 
 	// Cap RTO to remaining time.
 	if s.RTO > remaining {

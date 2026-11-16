@@ -105,6 +105,7 @@ type protocol struct {
 	timeWaitReuse              tcpip.TCPTimeWaitReuseOption
 	minRTO                     time.Duration
 	maxRTO                     time.Duration
+	rtoBackoffCap              time.Duration
 	maxRetries                 uint32
 	synRetries                 uint8
 	dispatcher                 dispatcher
@@ -367,6 +368,23 @@ func (p *protocol) SetOption(option tcpip.SettableTransportProtocolOption) tcpip
 		}
 		return nil
 
+	case *tcpip.TCPRTOBackoffCapOption:
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		capRTO := time.Duration(*v)
+		if capRTO <= 0 {
+			p.rtoBackoffCap = 0
+			return nil
+		}
+		if capRTO < p.minRTO {
+			return &tcpip.ErrInvalidOptionValue{}
+		}
+		if capRTO > p.maxRTO {
+			capRTO = p.maxRTO
+		}
+		p.rtoBackoffCap = capRTO
+		return nil
+
 	case *tcpip.TCPMaxRetriesOption:
 		p.mu.Lock()
 		p.maxRetries = uint32(*v)
@@ -471,6 +489,12 @@ func (p *protocol) Option(option tcpip.GettableTransportProtocolOption) tcpip.Er
 	case *tcpip.TCPMaxRTOOption:
 		p.mu.RLock()
 		*v = tcpip.TCPMaxRTOOption(p.maxRTO)
+		p.mu.RUnlock()
+		return nil
+
+	case *tcpip.TCPRTOBackoffCapOption:
+		p.mu.RLock()
+		*v = tcpip.TCPRTOBackoffCapOption(p.rtoBackoffCap)
 		p.mu.RUnlock()
 		return nil
 
@@ -591,6 +615,7 @@ func newProtocol(s *stack.Stack, cc string, probe TCPProbeFunc) stack.TransportP
 		synRetries:                 DefaultSynRetries,
 		minRTO:                     MinRTO,
 		maxRTO:                     MaxRTO,
+		rtoBackoffCap:              0,
 		maxRetries:                 MaxRetries,
 		recovery:                   tcpip.TCPRACKLossDetection,
 		seqnumSecret:               seqnumSecret,

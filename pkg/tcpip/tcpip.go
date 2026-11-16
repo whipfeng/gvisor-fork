@@ -1370,6 +1370,23 @@ func (*TCPMaxRTOOption) isGettableTransportProtocolOption() {}
 
 func (*TCPMaxRTOOption) isSettableTransportProtocolOption() {}
 
+// TCPRTOBackoffCapOption caps the retransmission timeout after the RFC 6298
+// exponential backoff (and after the RTO estimator), without changing the
+// connection give-up ceiling (TCPMaxRTOOption). Overlay stacks ride a carrier
+// that may drop packets (UDP leg) or HOL-block (TCP leg); exponential backoff
+// up to 2^6 x RTO turns one lost segment into a 10-30s stall. A cap of a few
+// hundred ms keeps recovery bounded while the carrier repairs itself.
+// Zero means disabled (RFC behavior).
+type TCPRTOBackoffCapOption time.Duration
+
+func (*TCPRTOBackoffCapOption) isGettableSocketOption() {}
+
+func (*TCPRTOBackoffCapOption) isSettableSocketOption() {}
+
+func (*TCPRTOBackoffCapOption) isGettableTransportProtocolOption() {}
+
+func (*TCPRTOBackoffCapOption) isSettableTransportProtocolOption() {}
+
 // TCPMaxRetriesOption is used by SetSockOpt/GetSockOpt to set/get the
 // maximum number of retransmits after which we time out the connection.
 type TCPMaxRetriesOption uint64
