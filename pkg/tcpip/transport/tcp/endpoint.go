@@ -415,16 +415,21 @@ type Endpoint struct {
 	// state.
 	origEndpointState uint32 `state:"nosave"`
 
-	isPortReserved    bool
-	isRegistered      bool
-	boundNICID        tcpip.NICID
-	route             *stack.Route `state:"nosave"`
+	isPortReserved bool
+	isRegistered   bool
+	boundNICID     tcpip.NICID
+	route          *stack.Route `state:"nosave"`
 	// RouteFunc is an optional per-endpoint route callback (Phaethon patch #13).
 	// When set, connect() calls it instead of stack.FindRoute(). The returned
 	// RouteDecision is used to build the route via stack.BuildRouteFromDecision.
 	// This allows v2 proxy connections to bypass the stack-level RouteSelector
 	// and use proxy-specific routing (direct IPIP to peer's LinkNIC).
 	RouteFunc func() stack.RouteDecision `state:"nosave"`
+	// RouteSrc is an optional source address handed to the stack RouteSelector
+	// on connect/reroute (Phaethon patch #16). Proxy dials set it to the real
+	// client address so source-aware egress selection sees the client rather
+	// than this node's GIP. Zero means "no hint" (dst-only selection).
+	RouteSrc          tcpip.Address `state:"nosave"`
 	ipv4TTL           uint8
 	ipv6HopLimit      int16
 	isConnectNotified bool
@@ -2472,7 +2477,9 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 		}
 	} else {
 		var err tcpip.Error
-		r, err = e.stack.FindRoute(nicID, e.TransportEndpointInfo.ID.LocalAddress, addr.Addr, netProto, false /* multicastLoop */)
+		// Phaethon patch #16: RouteSrc gives the selector the real client
+		// source for proxy dials; zero falls back to dst-only selection.
+		r, err = e.stack.FindRouteFrom(e.RouteSrc, nicID, e.TransportEndpointInfo.ID.LocalAddress, addr.Addr, netProto, false /* multicastLoop */)
 		if err != nil {
 			return err
 		}

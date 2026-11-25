@@ -101,7 +101,12 @@ type RouteDecision struct {
 // RouteSelector is a callback function that makes routing decisions
 // during FindRoute. It can override normal route table lookup for
 // special cases like fakeIP, IPIP encapsulation, etc.
-type RouteSelector func(dst tcpip.Address) RouteDecision
+//
+// src is the original packet source when the caller knows it (the IPv4
+// forwarding path and per-endpoint dials). It is the zero Address for
+// locally generated traffic and for destination-only queries such as
+// RouteSelectorLocalStack, where the source is not meaningful.
+type RouteSelector func(src, dst tcpip.Address) RouteDecision
 
 const (
 	// routeDecisionCacheLimit bounds the per-destination decision cache.
@@ -667,12 +672,17 @@ func (s *Stack) GetTunnelProtocol(number tcpip.TransportProtocolNumber) TunnelPr
 	return s.tunnelProtocols[number]
 }
 
-// decisionForSelector runs the RouteSelector for dst and applies the
+// decisionForSelector runs the RouteSelector for (src, dst) and applies the
 // §2.5 cache. It must be called WITHOUT s.mu held: the routeSelector
 // callback is invoked lock-free (it may call back into the stack, and a
 // blocking callback must not stall or deadlock stack readers). The
 // function takes s.mu only in brief read windows.
-func (s *Stack) decisionForSelector(dst tcpip.Address) (RouteDecision, bool) {
+//
+// The dst-only cache is used only when src is unset. A source-aware decision
+// can differ per flow for the same destination, so caching it by dst alone
+// would be wrong; those calls recompute every time (all forwarding branches
+// already set Cacheable=false, so this only skips a pointless lookup).
+func (s *Stack) decisionForSelector(src, dst tcpip.Address) (RouteDecision, bool) {
 	s.mu.RLock()
 	rs := s.routeSelector
 	s.mu.RUnlock()
@@ -681,29 +691,32 @@ func (s *Stack) decisionForSelector(dst tcpip.Address) (RouteDecision, bool) {
 	}
 
 	now := s.clock.NowMonotonic()
+	dstOnly := src.BitLen() == 0
 
 	// Cache lookup (§2.5): only decisions flagged Cacheable are stored.
 	// Expired entries are treated as misses and overwritten below.
-	s.routeDecisionCacheMu.RLock()
-	e, ok := s.routeDecisionCache[dst]
-	s.routeDecisionCacheMu.RUnlock()
-	if ok && now.Sub(e.added) < routeDecisionCacheTTL {
-		return e.decision, true
+	if dstOnly {
+		s.routeDecisionCacheMu.RLock()
+		e, ok := s.routeDecisionCache[dst]
+		s.routeDecisionCacheMu.RUnlock()
+		if ok && now.Sub(e.added) < routeDecisionCacheTTL {
+			return e.decision, true
+		}
 	}
 
-	decision := rs(dst)
+	decision := rs(src, dst)
 
 	// Phaethon patch #14 (self-heal): the decision's EgressNIC may reference
 	// a removed or disabled NIC (stale cache entry or selector drift). Verify
 	// under a brief RLock; re-query the selector lock-free if invalid, and
 	// let the fresh (valid) decision fall through to the cache write below.
 	if decision.EgressNIC != 0 && !s.selectorEgressNICValid(decision.EgressNIC) {
-		if fresh := rs(dst); fresh.EgressNIC == 0 || s.selectorEgressNICValid(fresh.EgressNIC) {
+		if fresh := rs(src, dst); fresh.EgressNIC == 0 || s.selectorEgressNICValid(fresh.EgressNIC) {
 			decision = fresh
 		}
 	}
 
-	if decision.Cacheable {
+	if decision.Cacheable && dstOnly {
 		s.routeDecisionCacheMu.Lock()
 		if s.routeDecisionCache == nil {
 			s.routeDecisionCache = make(map[tcpip.Address]routeDecisionCacheEntry)
@@ -749,7 +762,7 @@ func (s *Stack) selectorEgressNICValid(id tcpip.NICID) bool {
 // handleValidatedPacket and FindRoute; conntrack return packets with an
 // OutputNICName bypass it and forward through their recorded NIC.
 func (s *Stack) RouteSelectorLocalStack(dst tcpip.Address) bool {
-	decision, ok := s.decisionForSelector(dst)
+	decision, ok := s.decisionForSelector(tcpip.Address{}, dst)
 	return ok && decision.LocalStack
 }
 
@@ -1721,7 +1734,22 @@ func (s *Stack) findRouteWithLocalAddrFromAnyInterfaceRLocked(outgoingNIC *nic, 
 // remote address is provided, the stack will use a remote address equal to the
 // local address.
 func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
-	r, err := s.findRouteInner(id, localAddr, remoteAddr, netProto, multicastLoop)
+	return s.findRoute(tcpip.Address{}, id, localAddr, remoteAddr, netProto, multicastLoop)
+}
+
+// FindRouteFrom is FindRoute with the original packet source. src is handed to
+// the RouteSelector so source-aware policies can pick the egress; route
+// construction itself does not use it. Callers pass the pre-SNAT source of a
+// forwarded packet, or the real client for a per-endpoint proxy dial.
+func (s *Stack) FindRouteFrom(src tcpip.Address, id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+	return s.findRoute(src, id, localAddr, remoteAddr, netProto, multicastLoop)
+}
+
+// findRoute runs the selector once and threads the decision into
+// findRouteInner, so a packet never triggers two selector calls.
+func (s *Stack) findRoute(src tcpip.Address, id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+	decision, haveDecision := s.decisionForSelector(src, remoteAddr)
+	r, err := s.findRouteInner(decision, haveDecision, id, localAddr, remoteAddr, netProto, multicastLoop)
 	if err != nil || r == nil {
 		return r, err
 	}
@@ -1729,24 +1757,23 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	// Phaethon patch #12: LocalStack applies in-stack loopback to
 	// locally-generated packets. This single choke point covers every
 	// findRouteInner return path without threading a flag through makeRoute.
-	if s.RouteSelectorLocalStack(remoteAddr) {
+	if haveDecision && decision.LocalStack {
 		r.setLocalStack()
 	}
 	return r, nil
 }
 
-// findRouteInner is FindRoute without the Phaethon patch #10 loopback
-// override.
-func (s *Stack) findRouteInner(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
-	// Phaethon patch #3: Call RouteSelector if set.
-	// All FindRoute calls go through RouteSelector (no condition).
-	// Conntrack-managed return packets use FindRouteViaNIC to bypass RouteSelector.
+// findRouteInner is findRoute without the Phaethon patch #10 loopback
+// override. decision/haveDecision are the selector result computed by its
+// caller (lock-free, before s.mu is taken).
+func (s *Stack) findRouteInner(decision RouteDecision, haveSelectorDecision bool, id tcpip.NICID, localAddr, remoteAddr tcpip.Address, netProto tcpip.NetworkProtocolNumber, multicastLoop bool) (*Route, tcpip.Error) {
+	// Phaethon patch #3: the RouteSelector was already run by the caller.
+	// All FindRoute calls go through it (no condition).
+	// Conntrack-managed return packets use FindRouteViaNIC to bypass it.
 	// Phaethon design §2.5: Cacheable decisions are cached per destination;
 	// ClearRouteDecisionCache invalidates on topology changes.
 	// Phaethon patch #14: When the decision's NIC is invalid, the selector is
 	// re-queried lock-free inside decisionForSelector (self-healing cache).
-	// The selector runs BEFORE taking s.mu so its callback executes lock-free.
-	decision, haveSelectorDecision := s.decisionForSelector(remoteAddr)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()

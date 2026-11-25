@@ -883,7 +883,11 @@ func (e *endpoint) forwardUnicastPacket(pkt *stack.PacketBuffer) ip.ForwardingEr
 		}
 	}
 
-	r, err := stk.FindRoute(0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
+	// Phaethon: pass the packet's pre-SNAT source to the selector. The source
+	// dimension only affects the IPIP (non-mesh advertised) branch; the source
+	// address itself is not rewritten here (Postrouting SNAT runs later, in
+	// forwardWithIPIPEncapsulation).
+	r, err := stk.FindRouteFrom(srcAddr, 0, tcpip.Address{}, dstAddr, ProtocolNumber, false /* multicastLoop */)
 	switch err.(type) {
 	case nil:
 		// Phaethon diagnostic: FindRoute succeeded
@@ -941,19 +945,19 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	// Without this, the inner packet keeps its original source, and the return path fails.
 	inNicName := pkt.InputNICName
 	outNicName := e.protocol.stack.FindNICNameFromID(route.NICID())
-	
+
 	// Phaethon diagnostic: log before CheckPostrouting
 	h := header.IPv4(pkt.NetworkHeader().Slice())
 	util.LogModuleDebug("ipip", "CheckPostrouting BEFORE: src=%s dst=%s inNIC=%q outNIC=%q\n",
 		h.SourceAddress(), h.DestinationAddress(), inNicName, outNicName)
-	
+
 	if ok := e.protocol.stack.IPTables().CheckPostrouting(pkt, route, e, inNicName, outNicName); !ok {
 		e.stats.ip.IPTablesPostroutingDropped.Increment()
 		util.LogModuleDebug("ipip", "CheckPostrouting DROP: src=%s dst=%s inNIC=%s outNIC=%s\n",
 			pkt.NetworkHeader().Slice()[12:16], pkt.NetworkHeader().Slice()[16:20], inNicName, outNicName)
 		return nil // Packet dropped by iptables
 	}
-	
+
 	// Phaethon diagnostic: log after CheckPostrouting (SNAT may have changed src)
 	h2 := header.IPv4(pkt.NetworkHeader().Slice())
 	util.LogModuleDebug("ipip", "CheckPostrouting PASS: src=%s dst=%s (SNAT applied: %v)\n",

@@ -885,7 +885,8 @@ func (e *Endpoint) rerouteLocked() {
 		r, err = e.stack.BuildRouteFromDecision(e.RouteFunc(), old.NetProto(), local, remote)
 	} else {
 		// NIC 0: the old NIC no longer exists; the RouteSelector picks egress.
-		r, err = e.stack.FindRoute(0, local, remote, old.NetProto(), false /* multicastLoop */)
+		// RouteSrc keeps the source-aware choice stable across the reroute.
+		r, err = e.stack.FindRouteFrom(e.RouteSrc, 0, local, remote, old.NetProto(), false /* multicastLoop */)
 	}
 	if err != nil {
 		util.LogModuleDebug("gvisor", "[TCP-REROUTE] failed: local=%s:%d remote=%s:%d oldNIC=%d err=%v",
