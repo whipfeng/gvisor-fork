@@ -1399,11 +1399,11 @@ func (e *endpoint) handleValidatedPacket(h header.IPv6, pkt *stack.PacketBuffer,
 
 	// Phaethon patch #12: mirrors IPv4. Conntrack-marked return packets
 	// forward through OutputNICName before any destination local-stack policy.
-	if e.Forwarding() && (pkt.OutputNICName != "" || !e.protocol.stack.RouteSelectorLocalStack(dstAddr)) {
+	if e.Forwarding() && (pkt.OutputNICName != "" || !e.protocol.stack.RouteSelectorLocalStack(srcAddr, dstAddr)) {
 		e.handleForwardingError(e.forwardUnicastPacket(pkt))
 	} else if addressEndpoint := e.AcquireAssignedAddress(dstAddr, e.nic.Promiscuous(), stack.CanBePrimaryEndpoint, true /* readOnly */); addressEndpoint != nil {
 		e.deliverPacketLocally(h, pkt, inNICName)
-	} else if e.protocol.stack.RouteSelectorLocalStack(dstAddr) {
+	} else if e.protocol.stack.RouteSelectorLocalStack(srcAddr, dstAddr) {
 		// Phaethon patch #14: LocalStack=true but no addressEndpoint (Link NIC in
 		// promiscuous mode). Deliver locally anyway — the RouteSelector determined
 		// this is a local stack destination, and the TCP/UDP forwarder will handle it.

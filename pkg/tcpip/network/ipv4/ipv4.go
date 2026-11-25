@@ -1505,7 +1505,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 	// reach the local transport demuxer, while conntrack-marked return packets
 	// always forward through OutputNICName after reverse NAT restores the client
 	// destination. This bypasses destination policy for per-flow return routing.
-	localStack := e.protocol.stack.RouteSelectorLocalStack(dstAddr)
+	localStack := e.protocol.stack.RouteSelectorLocalStack(srcAddr, dstAddr)
 	// Phaethon diagnostic: trace the forward-vs-local decision
 	util.LogModuleDebug("gvisor", "handleValidatedPacket proto=%d nicID=%d nicName=%s forwarding=%v outputNIC=%q localStack=%v\n",
 		h.Protocol(), e.nic.ID(), inNICName, e.Forwarding(), pkt.OutputNICName, localStack)

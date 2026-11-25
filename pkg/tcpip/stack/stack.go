@@ -102,10 +102,9 @@ type RouteDecision struct {
 // during FindRoute. It can override normal route table lookup for
 // special cases like fakeIP, IPIP encapsulation, etc.
 //
-// src is the original packet source when the caller knows it (the IPv4
-// forwarding path and per-endpoint dials). It is the zero Address for
-// locally generated traffic and for destination-only queries such as
-// RouteSelectorLocalStack, where the source is not meaningful.
+// src is the original packet source when the caller knows it (the IPv4/IPv6
+// receive path, the forwarding path, and per-endpoint dials). It is the zero
+// Address only for locally generated traffic, where no original source exists.
 type RouteSelector func(src, dst tcpip.Address) RouteDecision
 
 const (
@@ -761,8 +760,13 @@ func (s *Stack) selectorEgressNICValid(id tcpip.NICID) bool {
 // local stack service or proxy entry (Phaethon patch #12). It is used by both
 // handleValidatedPacket and FindRoute; conntrack return packets with an
 // OutputNICName bypass it and forward through their recorded NIC.
-func (s *Stack) RouteSelectorLocalStack(dst tcpip.Address) bool {
-	decision, ok := s.decisionForSelector(tcpip.Address{}, dst)
+//
+// src is the packet source. Passing it keeps this probe on the same
+// source-aware decision key as the real forwarding path, so a non-mesh
+// advertised prefix is never elected (and cached in sticky) under a
+// source-less key that no real flow would use.
+func (s *Stack) RouteSelectorLocalStack(src, dst tcpip.Address) bool {
+	decision, ok := s.decisionForSelector(src, dst)
 	return ok && decision.LocalStack
 }
 
