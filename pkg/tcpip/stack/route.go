@@ -573,6 +573,13 @@ func (r *Route) MTU() uint32 {
 	return r.outgoingNIC.getNetworkEndpoint(r.NetProto()).MTU()
 }
 
+// ExplicitMTU returns the route's MTU override, or 0 when the route relies on
+// the outgoing NIC's MTU. Callers that fragment must use this instead of MTU()
+// to avoid the NIC-derived fallback being mistaken for an explicit budget.
+func (r *Route) ExplicitMTU() uint32 {
+	return r.mtu
+}
+
 // Release decrements the reference counter of the resources associated with the
 // route.
 func (r *Route) Release() {

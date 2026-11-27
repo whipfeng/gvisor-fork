@@ -625,18 +625,31 @@ type Endpoint struct {
 // If userMSS is non-zero and is not greater than the maximum possible MSS for
 // r, it will be used; otherwise, the maximum possible MSS will be used.
 func calculateAdvertisedMSS(userMSS uint16, r *stack.Route) uint16 {
-	return advertisedMSS(r.MTU(), r.NeedIPIP, userMSS)
+	return advertisedMSS(r.MTU(), r.ExplicitMTU() != 0, userMSS)
 }
 
-// advertisedMSS derives the MSS from a route's MTU budget. needIPIP marks an
-// IPIP route, whose MTU is the inner-packet budget (the whole inner IP packet,
-// IPv4 header included) rather than the network-layer MTU used by ordinary
-// routes; subtract the IPv4 header there so both branches advertise 1360 for
-// InnerMTU=1400 instead of over-advertising by 20 bytes and re-splitting a
-// full segment at the encapsulation boundary.
-func advertisedMSS(routeMTU uint32, needIPIP bool, userMSS uint16) uint16 {
-	maxMSS := uint16(routeMTU - header.TCPMinimumSize)
-	if needIPIP {
+// maxPayloadBudget converts a route's packet budget into the largest transport
+// payload the sender may put in one segment. An ordinary route's MTU is already
+// net of the network header; an explicit route MTU is a whole inner IP packet
+// budget (overlay mesh egress), so the IPv4 header is deducted to keep a full
+// segment inside it.
+func maxPayloadBudget(r *stack.Route) int {
+	mtu := int(r.MTU())
+	if r.ExplicitMTU() != 0 {
+		mtu -= header.IPv4MinimumSize
+	}
+	return mtu
+}
+
+// advertisedMSS derives the MSS from a route's packet budget. innerBudget marks
+// an explicit route MTU: it covers the whole inner IP packet (the overlay mesh
+// egress budget, whether or not IPIP is used) rather than the network-layer MTU
+// used by ordinary routes. Subtract the IPv4 header there so every mesh-egress
+// route advertises 1360 for InnerMTU=1400 instead of over-advertising by 20
+// bytes and re-splitting a full segment at the encapsulation boundary.
+func advertisedMSS(packetBudget uint32, innerBudget bool, userMSS uint16) uint16 {
+	maxMSS := uint16(packetBudget - header.TCPMinimumSize)
+	if innerBudget {
 		maxMSS -= header.IPv4MinimumSize
 	}
 	if userMSS != 0 && userMSS < maxMSS {
@@ -2532,7 +2545,7 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 			}
 		}
 		e.segmentQueue.mu.Unlock()
-		e.snd.updateMaxPayloadSize(int(e.route.MTU()), 0)
+		e.snd.updateMaxPayloadSize(maxPayloadBudget(e.route), 0)
 		e.setEndpointState(StateEstablished)
 		// Set the new auto tuned send buffer size after entering
 		// established state.

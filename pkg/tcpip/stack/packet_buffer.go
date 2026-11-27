@@ -163,6 +163,13 @@ type PacketBuffer struct {
 	// packets exit through the correct interface.
 	OutputNICName string
 
+	// IsMeshOuter marks an IPIP-encapsulated outer packet. An explicit route
+	// MTU is an inner-packet budget, which must not apply to the outer packet:
+	// its budget is the link MTU (inner + IPIP header). Fragmenting the outer
+	// packet is fatal because the peer decapsulates at the frame layer and
+	// never reassembles outer fragments.
+	IsMeshOuter bool
+
 	// RXChecksumValidated indicates that checksum verification may be
 	// safely skipped.
 	RXChecksumValidated bool
@@ -399,6 +406,7 @@ func (pk *PacketBuffer) Clone() *PacketBuffer {
 	newPk.NICID = pk.NICID
 	newPk.InputNICName = pk.InputNICName
 	newPk.OutputNICName = pk.OutputNICName
+	newPk.IsMeshOuter = pk.IsMeshOuter
 	newPk.RXChecksumValidated = pk.RXChecksumValidated
 	newPk.NetworkPacketInfo = pk.NetworkPacketInfo
 	newPk.tuple = pk.tuple
@@ -485,6 +493,7 @@ func (pk *PacketBuffer) DeepCopyForForwarding(reservedHeaderBytes int) *PacketBu
 	newPk.NICID = pk.NICID
 	newPk.InputNICName = pk.InputNICName
 	newPk.OutputNICName = pk.OutputNICName
+	newPk.IsMeshOuter = pk.IsMeshOuter
 
 	return newPk
 }

@@ -341,7 +341,7 @@ func newSenderHelper(ep *Endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, ms
 	s.probeTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.probeTimerExpired))
 	s.corkTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.corkTimerExpired))
 
-	s.updateMaxPayloadSize(int(ep.route.MTU()), 0)
+	s.updateMaxPayloadSize(maxPayloadBudget(ep.route), 0)
 	// Initialize SACK Scoreboard after updating max payload size as we use
 	// the maxPayloadSize as the smss when determining if a segment is lost
 	// etc.

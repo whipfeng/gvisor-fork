@@ -617,7 +617,18 @@ func (e *endpoint) writePacketPostRouting(r *stack.Route, pkt *stack.PacketBuffe
 
 	stats := e.stats.ip
 
-	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(len(pkt.NetworkHeader().Slice())))
+	// Phaethon: an explicit route MTU (overlay inner budget for mesh egress)
+	// also bounds fragmentation here. Route.MTU() is used for TCP MSS, but the
+	// write path must honor it too, otherwise UDP/ICMP (and forwarded packets)
+	// are fragmented at the NIC MTU and overshoot the UDP leg's datagram limit.
+	// IPIP outer packets are exempt: their budget is the link MTU (inner +
+	// IPIP header), and the peer decapsulates at the frame layer without
+	// reassembling outer fragments.
+	linkMTU := e.nic.MTU()
+	if routeMTU := r.ExplicitMTU(); !pkt.IsMeshOuter && routeMTU != 0 && routeMTU < linkMTU {
+		linkMTU = routeMTU
+	}
+	networkMTU, err := calculateNetworkMTU(linkMTU, uint32(len(pkt.NetworkHeader().Slice())))
 	if err != nil {
 		stats.OutgoingPacketErrors.Increment()
 		return err
@@ -1105,6 +1116,7 @@ func newIPIPOuterPacket(localEIP, egressEIP tcpip.Address, innerPkt []byte) *sta
 		DstAddr:     egressEIP,
 	})
 	outerH.SetChecksum(^outerH.CalculateChecksum())
+	outerPkt.IsMeshOuter = true
 	return outerPkt
 }
 

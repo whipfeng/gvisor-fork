@@ -869,7 +869,13 @@ func (e *endpoint) writePacket(r *stack.Route, pkt *stack.PacketBuffer, protocol
 	}
 
 	stats := e.stats.ip
-	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(len(pkt.NetworkHeader().Slice())))
+	// Phaethon: explicit route MTU (overlay inner budget) bounds fragmentation
+	// here as well; see the IPv4 write path for the rationale.
+	linkMTU := e.nic.MTU()
+	if routeMTU := r.ExplicitMTU(); routeMTU != 0 && routeMTU < linkMTU {
+		linkMTU = routeMTU
+	}
+	networkMTU, err := calculateNetworkMTU(linkMTU, uint32(len(pkt.NetworkHeader().Slice())))
 	if err != nil {
 		stats.OutgoingPacketErrors.Increment()
 		return err

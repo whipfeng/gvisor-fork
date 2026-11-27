@@ -16,28 +16,30 @@ package tcp
 
 import "testing"
 
-// TestAdvertisedMSS pins the MSS invariant: whether the route is an ordinary
-// one (MTU already net of the IPv4 header, 1380) or an IPIP one (MTU is the
-// whole inner packet budget, 1400), the advertised MSS must be 1360 for
-// InnerMTU=1400. The IPIP branch subtracts the 20-byte IPv4 header so a full
-// segment does not exceed the inner budget and get re-split.
+// TestAdvertisedMSS pins the MSS invariant: an ordinary route's packet budget is
+// already net of the IPv4 header (1380), while an explicit inner-packet budget
+// covers the whole inner IP packet (1400) whether the egress is a direct
+// LinkNIC or IPIP. Both must advertise 1360 for InnerMTU=1400, so a full
+// segment neither exceeds the inner budget nor is re-split at the encapsulation
+// boundary.
 func TestAdvertisedMSS(t *testing.T) {
 	tests := []struct {
-		name     string
-		routeMTU uint32
-		needIPIP bool
-		user     uint16
-		want     uint16
+		name         string
+		packetBudget uint32
+		innerBudget  bool
+		user         uint16
+		want         uint16
 	}{
-		{name: "ordinary route network MTU", routeMTU: 1380, user: 0, want: 1360},
-		{name: "ipip route inner budget", routeMTU: 1400, needIPIP: true, user: 0, want: 1360},
-		{name: "user mss below max wins", routeMTU: 1380, user: 1200, want: 1200},
-		{name: "user mss above max ignored", routeMTU: 1400, needIPIP: true, user: 1460, want: 1360},
+		{name: "ordinary route network MTU", packetBudget: 1380, user: 0, want: 1360},
+		{name: "inner budget direct LinkNIC", packetBudget: 1400, innerBudget: true, user: 0, want: 1360},
+		{name: "inner budget IPIP", packetBudget: 1400, innerBudget: true, user: 0, want: 1360},
+		{name: "user mss below max wins", packetBudget: 1380, user: 1200, want: 1200},
+		{name: "user mss above max ignored", packetBudget: 1400, innerBudget: true, user: 1460, want: 1360},
 	}
 	for _, tc := range tests {
-		if got := advertisedMSS(tc.routeMTU, tc.needIPIP, tc.user); got != tc.want {
+		if got := advertisedMSS(tc.packetBudget, tc.innerBudget, tc.user); got != tc.want {
 			t.Errorf("%s: advertisedMSS(%d, %v, %d) = %d, want %d",
-				tc.name, tc.routeMTU, tc.needIPIP, tc.user, got, tc.want)
+				tc.name, tc.packetBudget, tc.innerBudget, tc.user, got, tc.want)
 		}
 	}
 }

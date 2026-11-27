@@ -96,6 +96,14 @@ type RouteDecision struct {
 	// NIC. Conntrack packets with OutputNICName bypass this destination policy
 	// and always forward through the recorded NIC (Phaethon patch #12).
 	LocalStack bool
+
+	// MeshEgress marks the decision as an egress onto a mesh LinkNIC, whether
+	// or not IPIP encapsulation is used (NeedIPIP). Such routes carry the
+	// overlay inner-packet MTU so nothing handed to a LinkNIC exceeds the
+	// overlay budget: a LinkNIC may be carried by a UDP leg whose datagram
+	// limit is smaller than the LinkNIC MTU, and an oversize frame there is
+	// IP-fragmented (fragile across middleboxes).
+	MeshEgress bool
 }
 
 // RouteSelector is a callback function that makes routing decisions
@@ -653,26 +661,29 @@ func (s *Stack) IPIPSourceAddress() tcpip.Address {
 	return s.ipipSourceAddress
 }
 
-// SetIPIPInnerMTU sets the inner-packet MTU applied to IPIP routes. It must
-// account for the tunnel overhead so the encapsulated packet stays within the
-// underlying link; the stack then derives MSS and fragmentation from it.
+// SetIPIPInnerMTU sets the overlay inner-packet MTU. It is applied to every
+// mesh egress route (direct LinkNIC and IPIP alike), so the stack derives MSS
+// and fragmentation from it and no packet handed to a LinkNIC exceeds the
+// overlay budget regardless of why that LinkNIC is carried.
 func (s *Stack) SetIPIPInnerMTU(mtu uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ipipInnerMTU = mtu
 }
 
-// IPIPInnerMTU returns the configured IPIP inner-packet MTU (0 = unset).
+// IPIPInnerMTU returns the configured overlay inner-packet MTU (0 = unset).
 func (s *Stack) IPIPInnerMTU() uint32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ipipInnerMTU
 }
 
-// ipipRouteMTU is the route MTU for an IPIP decision: the configured inner
-// MTU when set, otherwise 0 so the route falls back to the NIC MTU.
-func (s *Stack) ipipRouteMTU(needIPIP bool) uint32 {
-	if needIPIP {
+// routeMTU is the route MTU override for a RouteSelector decision: the overlay
+// inner MTU for any mesh egress (MeshEgress, or IPIP), otherwise 0 so the route
+// falls back to the NIC MTU. Non-mesh decisions (local stack, TUN egress) keep
+// the NIC MTU.
+func (s *Stack) routeMTU(decision RouteDecision) uint32 {
+	if decision.MeshEgress || decision.NeedIPIP {
 		return s.ipipInnerMTU
 	}
 	return 0
@@ -1901,7 +1912,7 @@ func (s *Stack) findRouteInner(decision RouteDecision, haveSelectorDecision bool
 							addressEndpoint,
 							s.handleLocal,
 							multicastLoop,
-							s.ipipRouteMTU(decision.NeedIPIP), /* mtu */
+							s.routeMTU(decision), /* mtu */
 							decision.NeedIPIP,
 							decision.EgressEIP,
 						), nil
@@ -2161,8 +2172,8 @@ func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.Ne
 		localAddressNIC,
 		addressEndpoint,
 		s.handleLocal,
-		false,                             /* multicastLoop */
-		s.ipipRouteMTU(decision.NeedIPIP), /* mtu */
+		false,                /* multicastLoop */
+		s.routeMTU(decision), /* mtu */
 		decision.NeedIPIP,
 		decision.EgressEIP,
 	), nil
