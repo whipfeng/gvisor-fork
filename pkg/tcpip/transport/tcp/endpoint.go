@@ -629,19 +629,6 @@ func calculateAdvertisedMSS(userMSS uint16, r *stack.Route) uint16 {
 	// TODO(b/143359391): Respect TCP Min and Max size.
 	maxMSS := uint16(r.MTU() - header.TCPMinimumSize)
 
-	// Phaethon: cap the advertised MSS at 1360 (1400 inner MTU - IPv4/TCP
-	// headers) so in-stack endpoints never emit packets larger than the
-	// 1400-byte overlay MTU (tun.OverlayMTU). The overlay MTU is sized so a
-	// mesh frame fits a 1500-byte path when carried by the UDP leg
-	// (inner 1400 + IPIP 20 + frame 3 + UDP 8 + outer IP 20 = 1451).
-	// Without this cap, the 1600 link MTU (kept for IPIP outer-header
-	// headroom) yields oversized packets that fragment on the UDP leg; one
-	// lost fragment drops a whole datagram and stalls the inner TCP.
-	const maxAdvertisedMSS = 1360
-	if maxMSS > maxAdvertisedMSS {
-		maxMSS = maxAdvertisedMSS
-	}
-
 	if userMSS != 0 && userMSS < maxMSS {
 		return userMSS
 	}

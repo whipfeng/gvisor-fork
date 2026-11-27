@@ -254,6 +254,12 @@ type Stack struct {
 	// outer src = local EIP). Empty falls back to the route's local address.
 	ipipSourceAddress tcpip.Address `state:"nosave"`
 
+	// ipipInnerMTU is the inner-packet MTU advertised on IPIP routes so that
+	// the stack derives the correct MSS / fragments oversize packets itself
+	// instead of relying on a hard-coded MSS clamp. Zero means "use the
+	// outgoing NIC's MTU" (pre-existing behaviour).
+	ipipInnerMTU uint32 `state:"nosave"`
+
 	// routeDecisionCache caches RouteSelector decisions per destination
 	// address (Phaethon design §2.5). Only decisions with Cacheable=true
 	// are stored; invalidated via ClearRouteDecisionCache on route/topology
@@ -645,6 +651,31 @@ func (s *Stack) IPIPSourceAddress() tcpip.Address {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ipipSourceAddress
+}
+
+// SetIPIPInnerMTU sets the inner-packet MTU applied to IPIP routes. It must
+// account for the tunnel overhead so the encapsulated packet stays within the
+// underlying link; the stack then derives MSS and fragmentation from it.
+func (s *Stack) SetIPIPInnerMTU(mtu uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ipipInnerMTU = mtu
+}
+
+// IPIPInnerMTU returns the configured IPIP inner-packet MTU (0 = unset).
+func (s *Stack) IPIPInnerMTU() uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ipipInnerMTU
+}
+
+// ipipRouteMTU is the route MTU for an IPIP decision: the configured inner
+// MTU when set, otherwise 0 so the route falls back to the NIC MTU.
+func (s *Stack) ipipRouteMTU(needIPIP bool) uint32 {
+	if needIPIP {
+		return s.ipipInnerMTU
+	}
+	return 0
 }
 
 // RegisterTunnelProtocol registers a network-layer tunnel protocol handler (e.g., IPIP, GRE).
@@ -1870,7 +1901,7 @@ func (s *Stack) findRouteInner(decision RouteDecision, haveSelectorDecision bool
 							addressEndpoint,
 							s.handleLocal,
 							multicastLoop,
-							0, /* mtu */
+							s.ipipRouteMTU(decision.NeedIPIP), /* mtu */
 							decision.NeedIPIP,
 							decision.EgressEIP,
 						), nil
@@ -2130,8 +2161,8 @@ func (s *Stack) BuildRouteFromDecision(decision RouteDecision, netProto tcpip.Ne
 		localAddressNIC,
 		addressEndpoint,
 		s.handleLocal,
-		false, /* multicastLoop */
-		0,     /* mtu */
+		false,                             /* multicastLoop */
+		s.ipipRouteMTU(decision.NeedIPIP), /* mtu */
 		decision.NeedIPIP,
 		decision.EgressEIP,
 	), nil

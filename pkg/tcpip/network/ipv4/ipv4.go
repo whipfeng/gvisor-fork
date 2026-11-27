@@ -1010,15 +1010,6 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 		innerSrcAddr, innerDstAddr, innerProto, len(innerPkt),
 		localEIP, egressEIP, egressEIP, route.NICID())
 
-	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
-	defer outerPkt.DecRef()
-
-	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
-
-	// Diagnostic: log outer header created
-	util.LogModuleDebug("ipip", "outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
-		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
-
 	// Route the outer packet to the egress EIP through the normal route
 	// table (RouteSelector returns an empty decision for mesh addresses).
 	stk := e.protocol.stack
@@ -1032,6 +1023,52 @@ func (e *endpoint) forwardWithIPIPEncapsulation(route *stack.Route, pkt *stack.P
 	// Diagnostic: log FindRoute success
 	util.LogModuleDebug("ipip", "FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
 		egressEIP, outerRoute.NICID(), outerRoute.NeedIPIP)
+
+	// Enforce the inner MTU before encapsulation. The outer path must never
+	// fragment: the peer decapsulates before it reassembles, so one lost outer
+	// fragment discards the whole datagram with no chance of recovery.
+	// Fragment the inner packet with the stack's fragmenter and encapsulate
+	// each piece independently; the receiver reassembles the inner packet
+	// normally.
+	if innerMTU := route.MTU(); innerMTU != 0 && uint32(len(innerPkt)) > innerMTU {
+		// innerPkt comes from ToView(), a copy; the fragmenter reads pkt
+		// directly, so apply this hop's TTL decrement to the packet itself.
+		pktHdr := header.IPv4(pkt.NetworkHeader().Slice())
+		pktHdr.SetTTL(pktHdr.TTL() - 1)
+		pktHdr.SetChecksum(0)
+		pktHdr.SetChecksum(^pktHdr.CalculateChecksum())
+
+		networkMTU, err := calculateNetworkMTU(innerMTU, uint32(len(innerHdr)))
+		if err != nil {
+			return &ip.ErrOther{Err: err}
+		}
+		util.LogModuleDebug("ipip", "fragment inner: len=%d innerMTU=%d networkMTU=%d\n",
+			len(innerPkt), innerMTU, networkMTU)
+		_, _, ferr := e.handleFragments(route, networkMTU, pkt, func(fragPkt *stack.PacketBuffer) tcpip.Error {
+			fragView := fragPkt.ToView()
+			defer fragView.Release()
+			fragOuter := newIPIPOuterPacket(localEIP, egressEIP, fragView.AsSlice())
+			defer fragOuter.DecRef()
+			if err := e.forwardPacketWithRoute(outerRoute, fragOuter, false /* updateOptions */); err != nil {
+				util.LogModuleDebug("ipip", "fragment forward failed: err=%v\n", err)
+				return &tcpip.ErrAborted{}
+			}
+			return nil
+		})
+		if ferr != nil {
+			return &ip.ErrOther{Err: ferr}
+		}
+		return nil
+	}
+
+	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
+	defer outerPkt.DecRef()
+
+	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
+
+	// Diagnostic: log outer header created
+	util.LogModuleDebug("ipip", "outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
+		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
 
 	// forwardPacketWithRoute expects a header-included packet.
 	fwdErr := e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
@@ -1094,15 +1131,6 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 		innerIP.SourceAddress(), innerIP.DestinationAddress(), innerIP.Protocol(), len(innerPkt),
 		localEIP, egressEIP, r.NICID())
 
-	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
-	defer outerPkt.DecRef()
-
-	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
-
-	// Diagnostic: log outer header created
-	util.LogModuleDebug("ipip", "originate outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
-		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
-
 	// Route the outer packet to the egress EIP through the normal route
 	// table (RouteSelector returns an empty decision for mesh addresses).
 	stk := e.protocol.stack
@@ -1116,6 +1144,37 @@ func (e *endpoint) writeWithIPIPEncapsulation(r *stack.Route, pkt *stack.PacketB
 	// Diagnostic: log FindRoute success
 	util.LogModuleDebug("ipip", "originate FindRoute OK: egressEIP=%s nicID=%d needIPIP=%v\n",
 		egressEIP, outerRoute.NICID(), outerRoute.NeedIPIP)
+
+	// Same inner-MTU contract as the forwarding path: fragment before
+	// encapsulation so the outer path never fragments.
+	if innerMTU := r.MTU(); innerMTU != 0 && uint32(len(innerPkt)) > innerMTU {
+		networkMTU, err := calculateNetworkMTU(innerMTU, uint32(len(innerIP)))
+		if err != nil {
+			return err
+		}
+		util.LogModuleDebug("ipip", "originate fragment inner: len=%d innerMTU=%d networkMTU=%d\n",
+			len(innerPkt), innerMTU, networkMTU)
+		_, _, ferr := e.handleFragments(r, networkMTU, pkt, func(fragPkt *stack.PacketBuffer) tcpip.Error {
+			fragView := fragPkt.ToView()
+			defer fragView.Release()
+			fragOuter := newIPIPOuterPacket(localEIP, egressEIP, fragView.AsSlice())
+			defer fragOuter.DecRef()
+			if err := e.forwardPacketWithRoute(outerRoute, fragOuter, false /* updateOptions */); err != nil {
+				return &tcpip.ErrAborted{}
+			}
+			return nil
+		})
+		return ferr
+	}
+
+	outerPkt := newIPIPOuterPacket(localEIP, egressEIP, innerPkt)
+	defer outerPkt.DecRef()
+
+	outerH := header.IPv4(outerPkt.NetworkHeader().Slice())
+
+	// Diagnostic: log outer header created
+	util.LogModuleDebug("ipip", "originate outer_header: src=%s dst=%s proto=%d ttl=%d totalLen=%d\n",
+		outerH.SourceAddress(), outerH.DestinationAddress(), outerH.Protocol(), outerH.TTL(), outerH.TotalLength())
 
 	// forwardPacketWithRoute expects a header-included packet.
 	fwdErr := e.forwardPacketWithRoute(outerRoute, outerPkt, false /* updateOptions */)
