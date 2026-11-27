@@ -625,14 +625,23 @@ type Endpoint struct {
 // If userMSS is non-zero and is not greater than the maximum possible MSS for
 // r, it will be used; otherwise, the maximum possible MSS will be used.
 func calculateAdvertisedMSS(userMSS uint16, r *stack.Route) uint16 {
-	// The maximum possible MSS is dependent on the route.
-	// TODO(b/143359391): Respect TCP Min and Max size.
-	maxMSS := uint16(r.MTU() - header.TCPMinimumSize)
+	return advertisedMSS(r.MTU(), r.NeedIPIP, userMSS)
+}
 
+// advertisedMSS derives the MSS from a route's MTU budget. needIPIP marks an
+// IPIP route, whose MTU is the inner-packet budget (the whole inner IP packet,
+// IPv4 header included) rather than the network-layer MTU used by ordinary
+// routes; subtract the IPv4 header there so both branches advertise 1360 for
+// InnerMTU=1400 instead of over-advertising by 20 bytes and re-splitting a
+// full segment at the encapsulation boundary.
+func advertisedMSS(routeMTU uint32, needIPIP bool, userMSS uint16) uint16 {
+	maxMSS := uint16(routeMTU - header.TCPMinimumSize)
+	if needIPIP {
+		maxMSS -= header.IPv4MinimumSize
+	}
 	if userMSS != 0 && userMSS < maxMSS {
 		return userMSS
 	}
-
 	return maxMSS
 }
 
