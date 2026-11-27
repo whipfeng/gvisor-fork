@@ -1210,6 +1210,20 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	h := header.IPv4(hView.AsSlice())
 	defer hView.Release()
 
+	// Phaethon patch #15: reassemble fragments on ingress before any routing or
+	// NAT decision. Upstream only reassembles in the local-delivery path, so
+	// forwarded fragments reach Postrouting without a parsed transport header
+	// and iptables targets that need it (SNAT) drop them.
+	if h.More() || h.FragmentOffset() != 0 {
+		resPkt, ready := e.reassembleFragment(pkt, h)
+		if !ready {
+			return
+		}
+		defer resPkt.DecRef()
+		pkt = resPkt
+		h = header.IPv4(pkt.NetworkHeader().Slice())
+	}
+
 	if !e.nic.IsLoopback() {
 		if !e.protocol.options.AllowExternalLoopbackTraffic {
 			if header.IsV4LoopbackAddress(h.SourceAddress()) {
@@ -1269,12 +1283,118 @@ func (e *endpoint) handleLocalPacket(pkt *stack.PacketBuffer, canSkipRXChecksum 
 	h := header.IPv4(hView.AsSlice())
 	defer hView.Release()
 
+	// Phaethon patch #15: same early reassembly as HandlePacket, for packets
+	// originated by local raw sockets.
+	if h.More() || h.FragmentOffset() != 0 {
+		resPkt, ready := e.reassembleFragment(pkt, h)
+		if !ready {
+			return
+		}
+		defer resPkt.DecRef()
+		pkt = resPkt
+		h = header.IPv4(pkt.NetworkHeader().Slice())
+	}
+
 	// Phaethon patch #7: align with Linux semantics — locally-generated
 	// socket traffic does not enter the INPUT chain via an interface, so
 	// we pass an empty inNICName here. The external-receive path
 	// (HandlePacket) still passes e.nic.Name() so that filters using
 	// `-i <nic>` correctly match only externally-received packets.
 	e.handleValidatedPacket(h, pkt, "" /* inNICName */)
+}
+
+// reassembleFragment buffers an incoming IPv4 fragment and returns the fully
+// reassembled datagram once every fragment has arrived.
+//
+// Reassembly must happen before iptables and route selection: NAT targets need
+// a transport header (a fragment other than the first has none) and the route
+// selector needs the inner 5-tuple to pick a stable egress node.
+func (e *endpoint) reassembleFragment(pkt *stack.PacketBuffer, h header.IPv4) (*stack.PacketBuffer, bool) {
+	stats := e.stats.ip
+
+	if pkt.Data().Size() == 0 {
+		// Drop the packet as it's marked as a fragment but has no payload.
+		stats.MalformedPacketsReceived.Increment()
+		stats.MalformedFragmentsReceived.Increment()
+		return nil, false
+	}
+
+	if opts := h.Options(); len(opts) != 0 {
+		// Check options before assembling so errant packets are not assembled.
+		// Options themselves are left untouched: rewriting them here would
+		// double-process them on the reassembled packet.
+		if _, _, optProblem := e.processIPOptions(pkt, opts, &optionUsageVerify{}); optProblem != nil {
+			if optProblem.NeedICMP {
+				_ = e.protocol.returnError(&icmpReasonParamProblem{
+					pointer: optProblem.Pointer,
+				}, pkt, false /* deliveredLocally */)
+				stats.MalformedPacketsReceived.Increment()
+			}
+			return nil, false
+		}
+	}
+
+	start := h.FragmentOffset()
+	// Note that this addition doesn't overflow even on 32bit architecture
+	// because pkt.Data().Size() should not exceed 65535 (the max IP datagram
+	// size). Otherwise the packet would've been rejected as invalid before
+	// reaching here.
+	if int(start)+pkt.Data().Size() > header.IPv4MaximumPayloadSize {
+		stats.MalformedPacketsReceived.Increment()
+		stats.MalformedFragmentsReceived.Increment()
+		return nil, false
+	}
+
+	proto := h.Protocol()
+	resPkt, transProtoNum, ready, err := e.protocol.fragmentation.Process(
+		// As per RFC 791 section 2.3, the identification value is unique
+		// for a source-destination pair and protocol.
+		fragmentation.FragmentID{
+			Source:      h.SourceAddress(),
+			Destination: h.DestinationAddress(),
+			ID:          uint32(h.ID()),
+			Protocol:    proto,
+		},
+		start,
+		start+uint16(pkt.Data().Size())-1,
+		h.More(),
+		proto,
+		pkt,
+	)
+	if err != nil {
+		stats.MalformedPacketsReceived.Increment()
+		stats.MalformedFragmentsReceived.Increment()
+		util.LogModuleDebug("gvisor", "ipv4 reassembly error: id=%d off=%d more=%v src=%s dst=%s err=%v\n",
+			h.ID(), h.FragmentOffset(), h.More(), h.SourceAddress(), h.DestinationAddress(), err)
+		return nil, false
+	}
+	if !ready {
+		util.LogModuleDebug("gvisor", "ipv4 reassembly buffered: id=%d off=%d more=%v src=%s dst=%s proto=%d\n",
+			h.ID(), h.FragmentOffset(), h.More(), h.SourceAddress(), h.DestinationAddress(), proto)
+		return nil, false
+	}
+
+	// The reassembler restores the payload plus the first fragment's header but
+	// leaves the fragment fields as they were; fix them up and recompute the
+	// header checksum so that downstream incremental NAT updates stay valid.
+	rh := header.IPv4(resPkt.NetworkHeader().Slice())
+	rh.SetFlagsFragmentOffset(0, 0)
+	rh.SetTotalLength(uint16(len(rh) + resPkt.Data().Size()))
+	rh.SetChecksum(0)
+	rh.SetChecksum(^rh.CalculateChecksum())
+
+	// Preserve the inbound metadata carried by the fragment that completed the
+	// datagram.
+	resPkt.NICID = pkt.NICID
+	resPkt.PktType = pkt.PktType
+	resPkt.InputNICName = pkt.InputNICName
+	resPkt.RXChecksumValidated = pkt.RXChecksumValidated
+
+	e.protocol.parseTransport(resPkt, tcpip.TransportProtocolNumber(transProtoNum))
+
+	util.LogModuleDebug("gvisor", "ipv4 reassembly complete: id=%d src=%s dst=%s proto=%d len=%d\n",
+		h.ID(), rh.SourceAddress(), rh.DestinationAddress(), rh.Protocol(), resPkt.Size())
+	return resPkt, true
 }
 
 func validateAddressesForForwarding(h header.IPv4) ip.ForwardingError {
@@ -1675,89 +1795,8 @@ func (e *endpoint) deliverPacketLocally(h header.IPv4, pkt *stack.PacketBuffer, 
 		return
 	}
 
-	// Phaethon diagnostic: check if packet is a fragment
-	isFragment := h.More() || h.FragmentOffset() != 0
-	util.LogModuleDebug("gvisor", "CheckInput OK more=%v fragOff=%d isFragment=%v\n",
-		h.More(), h.FragmentOffset(), isFragment)
-
-	if h.More() || h.FragmentOffset() != 0 {
-		if pkt.Data().Size()+len(pkt.TransportHeader().Slice()) == 0 {
-			// Drop the packet as it's marked as a fragment but has
-			// no payload.
-			stats.ip.MalformedPacketsReceived.Increment()
-			stats.ip.MalformedFragmentsReceived.Increment()
-			return
-		}
-		if opts := h.Options(); len(opts) != 0 {
-			// If there are options we need to check them before we do assembly
-			// or we could be assembling errant packets. However we do not change the
-			// options as that could lead to double processing later.
-			if _, _, optProblem := e.processIPOptions(pkt, opts, &optionUsageVerify{}); optProblem != nil {
-				if optProblem.NeedICMP {
-					_ = e.protocol.returnError(&icmpReasonParamProblem{
-						pointer: optProblem.Pointer,
-					}, pkt, true /* deliveredLocally */)
-					e.stats.ip.MalformedPacketsReceived.Increment()
-				}
-				return
-			}
-		}
-		// The packet is a fragment, let's try to reassemble it.
-		start := h.FragmentOffset()
-		// Drop the fragment if the size of the reassembled payload would exceed the
-		// maximum payload size.
-		//
-		// Note that this addition doesn't overflow even on 32bit architecture
-		// because pkt.Data().Size() should not exceed 65535 (the max IP datagram
-		// size). Otherwise the packet would've been rejected as invalid before
-		// reaching here.
-		if int(start)+pkt.Data().Size() > header.IPv4MaximumPayloadSize {
-			stats.ip.MalformedPacketsReceived.Increment()
-			stats.ip.MalformedFragmentsReceived.Increment()
-			return
-		}
-
-		proto := h.Protocol()
-		resPkt, transProtoNum, ready, err := e.protocol.fragmentation.Process(
-			// As per RFC 791 section 2.3, the identification value is unique
-			// for a source-destination pair and protocol.
-			fragmentation.FragmentID{
-				Source:      h.SourceAddress(),
-				Destination: h.DestinationAddress(),
-				ID:          uint32(h.ID()),
-				Protocol:    proto,
-			},
-			start,
-			start+uint16(pkt.Data().Size())-1,
-			h.More(),
-			proto,
-			pkt,
-		)
-		if err != nil {
-			stats.ip.MalformedPacketsReceived.Increment()
-			stats.ip.MalformedFragmentsReceived.Increment()
-			return
-		}
-		if !ready {
-			// Phaethon diagnostic: fragment not ready
-			util.LogModuleDebug("gvisor", "Fragment NOT READY id=%d fragOff=%d more=%v\n",
-				h.ID(), h.FragmentOffset(), h.More())
-			return
-		}
-		defer resPkt.DecRef()
-		pkt = resPkt
-		h = header.IPv4(pkt.NetworkHeader().Slice())
-
-		// The reassembler doesn't take care of fixing up the header, so we need
-		// to do it here.
-		h.SetTotalLength(uint16(pkt.Data().Size() + len(h)))
-		h.SetFlagsFragmentOffset(0, 0)
-
-		e.protocol.parseTransport(pkt, tcpip.TransportProtocolNumber(transProtoNum))
-
-		// Now that the packet is reassembled, it can be sent to raw sockets.
-		e.dispatcher.DeliverRawPacket(h.TransportProtocol(), pkt)
-	}
+	// Phaethon patch #15: fragments are reassembled in HandlePacket before
+	// prerouting, so no fragment can reach local delivery.
 	stats.ip.PacketsDelivered.Increment()
 
 	p := h.TransportProtocol()
